@@ -208,17 +208,22 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 	// Idempotency: create at most once per Idempotency-Key. Item validation,
 	// the convoy bead create, and the link loop (with its rollback) all live in
 	// the closure so a failed create releases the reservation for retry.
-	convoy, err := withIdempotency(s.idem, "/v0/convoys", input.IdempotencyKey, input.Body,
+	created, err := withIdempotency(s.idem, "/v0/convoys", input.IdempotencyKey, input.Body,
 		func() (beads.Bead, error) {
 			store := s.findStore(input.Body.Rig)
 			if store == nil {
 				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
 			}
 
-			// Pre-validate all items exist before creating the convoy.
+			// Pre-validate all items exist and reject non-leaf children before
+			// creating the convoy so validation is all-or-nothing.
 			for _, itemID := range input.Body.Items {
-				if _, err := store.Get(itemID); err != nil {
+				item, err := store.Get(itemID)
+				if err != nil {
 					return beads.Bead{}, storeError(err)
+				}
+				if rejectErr := convoycore.RejectNonLeafChild(item); rejectErr != nil {
+					return beads.Bead{}, apierr.InvalidRequest.Msg(rejectErr.Error())
 				}
 			}
 
@@ -251,7 +256,7 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 
 	return &IndexOutput[beads.Bead]{
 		Index: s.latestIndex(),
-		Body:  convoy,
+		Body:  created,
 	}, nil
 }
 
@@ -273,10 +278,15 @@ func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (
 		if b.Type != "convoy" {
 			return nil, apierr.InvalidRequest.Msg("bead " + id + " is not a convoy")
 		}
-		// Pre-validate all items exist before linking.
+		// Pre-validate all items and reject non-leaf children before linking
+		// so the operation is all-or-nothing.
 		for _, itemID := range input.Body.Items {
-			if _, err := store.Get(itemID); err != nil {
+			item, err := store.Get(itemID)
+			if err != nil {
 				return nil, storeError(err)
+			}
+			if rejectErr := convoycore.RejectNonLeafChild(item); rejectErr != nil {
+				return nil, apierr.InvalidRequest.Msg(rejectErr.Error())
 			}
 		}
 		applied := make([]string, 0, len(input.Body.Items))
