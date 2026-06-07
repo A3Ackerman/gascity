@@ -3834,6 +3834,7 @@ export interface components {
             Path: string | null;
             Prefix: string | null;
             Suspended: boolean | null;
+            SuspendedOnStart: boolean | null;
         };
         RigPatchSetInputBody: {
             /** @description Override mainline branch. */

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -849,6 +850,66 @@ func TestDoSlingSuspendedAgentForce(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "suspended") {
 		t.Errorf("--force should suppress warning; stderr = %q", stderr.String())
+	}
+}
+
+func TestDoSlingSuspendedRigWarns(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	opts := testOpts(a, "my-1")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes)", code)
+	}
+	if !strings.Contains(stderr.String(), `rig "myrig" is suspended`) {
+		t.Errorf("stderr = %q, want suspended-rig warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc rig resume myrig") {
+		t.Errorf("stderr = %q, want resume hint", stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
+}
+
+func TestDoSlingSuspendedRigForce(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	opts := testOpts(a, "my-1")
+	opts.Force = true
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0", code)
+	}
+	if strings.Contains(stderr.String(), "suspended") {
+		t.Errorf("--force should suppress warning; stderr = %q", stderr.String())
+	}
+}
+
+func TestSlingJSONWarningsSuspendedRig(t *testing.T) {
+	warnings := slingJSONWarnings(sling.SlingResult{SuspendedRig: "myrig"})
+	if !slices.Contains(warnings, "rig_suspended") {
+		t.Errorf("warnings = %v, want to contain rig_suspended", warnings)
 	}
 }
 
@@ -7228,7 +7289,7 @@ func TestDoSlingCrossRigFormulaExempt(t *testing.T) {
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs:      []config.Rig{{Name: "hello-world", Path: "/tmp/hw"}},
 	}
-	a := config.Agent{Name: "polecat", Dir: "hello-world"}
+	a := config.Agent{Name: "polecat", Dir: "hello-world", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.StoreRef = "rig:hello-world"
@@ -7537,11 +7598,26 @@ func TestDefaultFormulaExplicitOnOverrides(t *testing.T) {
 func TestDefaultFormulaExplicitFormulaOverrides(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	dir := testFormulaDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "explicit-root-only.toml"), []byte(`
+formula = "explicit-root-only"
+version = 1
+phase = "vapor"
+
+[[steps]]
+id = "work"
+title = "Work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{dir}},
+	}
 	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	opts := testOpts(a, "code-review")
+	opts := testOpts(a, "explicit-root-only")
 	opts.IsFormula = true
 	code := doSling(opts, deps, nil, stdout, stderr)
 
@@ -7556,8 +7632,8 @@ func TestDefaultFormulaExplicitFormulaOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get(gc-1): %v", err)
 	}
-	if b.Ref != "code-review" {
-		t.Errorf("bead Ref = %q, want explicit code-review", b.Ref)
+	if b.Ref != "explicit-root-only" {
+		t.Errorf("bead Ref = %q, want explicit-root-only", b.Ref)
 	}
 }
 

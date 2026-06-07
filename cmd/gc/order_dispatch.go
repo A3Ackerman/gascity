@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 const (
@@ -266,6 +267,7 @@ type memoryOrderDispatcher struct {
 	nextDispatchStart    int
 	cfg                  *config.City
 	cityName             string
+	cityPath             string
 	cacheMu              sync.Mutex
 	lastRunCache         map[string]time.Time
 
@@ -389,15 +391,21 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 		maxDispatchesPerTick: defaultMaxOrderDispatchesPerTick,
 		cfg:                  cfg,
 		cityName:             loadedCityName(cfg, cityPath),
+		cityPath:             cityPath,
 		dispatchCtx:          dispatchCtx,
 		dispatchCancel:       dispatchCancel,
 	}
 }
 
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {
-	// Skip all order dispatch when the city is suspended.
-	if m.cfg != nil && citySuspended(m.cfg) {
-		return
+	// Skip all order dispatch when the city is suspended. Use the
+	// dispatcher's in-scope city path so suspension state resolves
+	// against the controlled city rather than the process cwd.
+	if m.cfg != nil {
+		st, _ := loadSuspensionState(fsys.OSFS{}, m.cityPath)
+		if citySuspendedWithState(m.cfg, st) {
+			return
+		}
 	}
 
 	stores := make(map[string]beads.Store)
@@ -1157,6 +1165,13 @@ func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Ord
 	return formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
 }
 
+func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) string {
+	if strings.TrimSpace(a.Pool) == "" || formula.RecipeHasReadySurface(recipe) {
+		return ""
+	}
+	return fmt.Sprintf("warning: pool order %q uses formula %q whose root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or graph.v2 before routing it to a pool.", a.ScopedName(), a.Formula)
+}
+
 func redactOrderEnvError(err error, env []string) string {
 	if err == nil {
 		return ""
@@ -1224,6 +1239,9 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
+	if warning := poolOrderRouteVisibilityWarning(a, recipe); warning != "" {
+		logDispatchError(m.stderr, "gc: order %s: %s", scoped, warning)
+	}
 
 	var pool string
 	if a.Pool != "" {
@@ -1273,18 +1291,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		)
 	}
 	if a.Pool != "" {
-		// Same metadata-pair the CLI path (cmd_order.go:doOrderRunWithJSON)
-		// writes — gc.routed_to so the worker's Tier-3 work_query and bd
-		// CLI tooling see the routing, plus poolDemandMetadataPair() so
-		// the supervisor's defaultScaleCheckCounts can count the wisp as
-		// scale_check demand. Without the second pair, supervisor-cron
-		// dispatched orders silently never spawn a pool worker because
-		// the molecule wisp is filtered out of Ready() by
-		// readyExcludeTypes (per PR #1154). See cmd/gc/pool_demand.go.
 		update.Metadata = map[string]string{"gc.routed_to": pool}
-		for k, v := range poolDemandMetadataPair() {
-			update.Metadata[k] = v
-		}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		// Label failure is critical for duplicate-dispatch prevention.
@@ -1343,9 +1350,10 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 	if rigName == "" {
 		return false
 	}
-	for _, r := range m.cfg.Rigs {
-		if r.Name == rigName {
-			return r.Suspended
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, m.cityPath)
+	for i := range m.cfg.Rigs {
+		if m.cfg.Rigs[i].Name == rigName {
+			return suspensionstate.EffectiveRigSuspended(suspState, rigName, m.cfg.Rigs[i].EffectiveSuspendedOnStart())
 		}
 	}
 	return false

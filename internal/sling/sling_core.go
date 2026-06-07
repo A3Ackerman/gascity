@@ -88,6 +88,9 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	if a.Suspended && !opts.Force {
 		result.AgentSuspended = true
 	}
+	if !opts.Force && rigSuspended(deps.Cfg, a.Dir) {
+		result.SuspendedRig = a.Dir
+	}
 	sp := agentutil.ScaleParamsFor(&a)
 	if sp.Max == 0 && !opts.Force {
 		result.PoolEmpty = true
@@ -100,6 +103,13 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	}
 	if shouldGuardCrossRig(opts) {
 		if err := CrossRigRouteError(opts.BeadOrFormula, a, deps.Cfg); err != nil {
+			return result, err
+		}
+	}
+
+	// Dependency cycle check: reject slings that would create a deadlock.
+	if shouldCheckDepCycle(opts) {
+		if err := DetectCycle(opts.BeadOrFormula, deps.Store); err != nil {
 			return result, err
 		}
 	}
@@ -154,6 +164,21 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	return result, nil
 }
 
+// rigSuspended reports whether the named rig is marked suspended in config.
+// The pool reconciler skips suspended rigs entirely, so a bead routed into
+// one stalls silently — no worker ever spawns to claim it.
+func rigSuspended(cfg *config.City, rigName string) bool {
+	if cfg == nil || rigName == "" {
+		return false
+	}
+	for _, r := range cfg.Rigs {
+		if r.Name == rigName {
+			return r.Suspended
+		}
+	}
+	return false
+}
+
 func shouldValidateExistingBead(opts SlingOpts) bool {
 	if opts.IsFormula || (opts.DryRun && opts.InlineText) {
 		return false
@@ -163,6 +188,13 @@ func shouldValidateExistingBead(opts SlingOpts) bool {
 
 func usesFormulaBackedRoute(opts SlingOpts) bool {
 	return opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "")
+}
+
+func shouldCheckDepCycle(opts SlingOpts) bool {
+	// Only meaningful for plain-bead slinging where a bead ID is known.
+	// Formula slinging creates new molecules whose deps aren't bead-graph deps.
+	// Force and dry-run bypass cycle detection intentionally.
+	return !opts.IsFormula && opts.OnFormula == "" && !opts.Force && !opts.DryRun && !opts.InlineText
 }
 
 func shouldGuardCrossRig(opts SlingOpts) bool {
@@ -207,6 +239,7 @@ func validateExistingBeadInQuerier(beadID, storeRef string, querier BeadQuerier)
 func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	a := opts.Target
 	method := "formula"
+	searchPaths := SlingFormulaSearchPaths(deps, a)
 	inv, isGraph, err := prepareGraphV2FormulaInvocation(context.Background(), opts.BeadOrFormula, "", opts, deps, a)
 	if err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
@@ -215,7 +248,14 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if isGraph {
 		formulaVars = inv.Vars
 	}
-	mResult, err := InstantiateSlingFormula(context.Background(), opts.BeadOrFormula, SlingFormulaSearchPaths(deps, a), molecule.Options{
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), opts.BeadOrFormula, searchPaths, formulaVars)
+	if err != nil {
+		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
+	}
+	if a.SupportsMultipleSessions() && !formula.RecipeHasReadySurface(recipe) {
+		return SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula, Deprecations: inv.Deprecations}, fmt.Errorf("formula %q root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or graph.v2 before routing it to a pool", opts.BeadOrFormula)
+	}
+	mResult, err := InstantiateSlingFormula(context.Background(), opts.BeadOrFormula, searchPaths, molecule.Options{
 		Title: opts.Title,
 		Vars:  formulaVars,
 	}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
