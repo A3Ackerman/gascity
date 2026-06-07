@@ -13,6 +13,7 @@ package dolt_test
 // and an absent remote ref yields "branch not found: remotes/...".
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -73,8 +74,9 @@ func installFFFakeDolt(t *testing.T, dir, body string) string {
 
 // writeSyncFakeDoltClassify: fetch succeeds; the ahead/behind range queries
 // report the given counts; DOLT_PUSH is logged and succeeds.
-func writeSyncFakeDoltClassify(t *testing.T, dir, branch string, ahead, behind int) string {
+func writeSyncFakeDoltClassify(t *testing.T, dir string, ahead, behind int) string {
 	t.Helper()
+	branch := "main"
 	logPath := filepath.Join(dir, "dolt.log")
 	aheadPat := "dolt_log('remotes/origin/" + branch + ".." + branch + "')"
 	behindPat := "dolt_log('" + branch + "..remotes/origin/" + branch + "')"
@@ -124,7 +126,7 @@ func readLog(t *testing.T, logPath string) string {
 
 func TestSyncAheadOnlyFastForwardPushes(t *testing.T) {
 	binDir := t.TempDir()
-	logPath := writeSyncFakeDoltClassify(t, binDir, "main", 2, 0)
+	logPath := writeSyncFakeDoltClassify(t, binDir, 2, 0)
 	out := runFFSync(t, binDir, "--db", "app")
 	log := readLog(t, logPath)
 	if !strings.Contains(log, "CALL DOLT_PUSH('origin', 'main')") {
@@ -137,7 +139,7 @@ func TestSyncAheadOnlyFastForwardPushes(t *testing.T) {
 
 func TestSyncBehindRefusesAndDoesNotPush(t *testing.T) {
 	binDir := t.TempDir()
-	logPath := writeSyncFakeDoltClassify(t, binDir, "main", 0, 3)
+	logPath := writeSyncFakeDoltClassify(t, binDir, 0, 3)
 	out := runFFSync(t, binDir, "--db", "app")
 	if pushed(readLog(t, logPath)) {
 		t.Fatalf("behind DB must NOT be pushed.\nout:\n%s", out)
@@ -149,7 +151,7 @@ func TestSyncBehindRefusesAndDoesNotPush(t *testing.T) {
 
 func TestSyncDivergedRefusesAndDoesNotPush(t *testing.T) {
 	binDir := t.TempDir()
-	logPath := writeSyncFakeDoltClassify(t, binDir, "main", 2, 3)
+	logPath := writeSyncFakeDoltClassify(t, binDir, 2, 3)
 	out := runFFSync(t, binDir, "--db", "app")
 	if pushed(readLog(t, logPath)) {
 		t.Fatalf("diverged DB must NOT be pushed.\nout:\n%s", out)
@@ -161,7 +163,7 @@ func TestSyncDivergedRefusesAndDoesNotPush(t *testing.T) {
 
 func TestSyncUpToDateSkipsPush(t *testing.T) {
 	binDir := t.TempDir()
-	logPath := writeSyncFakeDoltClassify(t, binDir, "main", 0, 0)
+	logPath := writeSyncFakeDoltClassify(t, binDir, 0, 0)
 	out := runFFSync(t, binDir, "--db", "app")
 	if pushed(readLog(t, logPath)) {
 		t.Fatalf("up-to-date DB must NOT be pushed.\nout:\n%s", out)
@@ -194,7 +196,7 @@ func TestSyncFirstPushWhenRemoteRefAbsentPushes(t *testing.T) {
 
 func TestSyncForceStillPushesWhenDiverged(t *testing.T) {
 	binDir := t.TempDir()
-	logPath := writeSyncFakeDoltClassify(t, binDir, "main", 2, 3)
+	logPath := writeSyncFakeDoltClassify(t, binDir, 2, 3)
 	out := runFFSync(t, binDir, "--db", "app", "--force")
 	if !strings.Contains(readLog(t, logPath), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") {
 		t.Fatalf("--force must bypass classification and force-push.\nout:\n%s\nlog:\n%s", out, readLog(t, logPath))
@@ -246,8 +248,8 @@ func TestSyncRejectsInvalidFetchTimeout(t *testing.T) {
 			"GC_DOLT_SYNC_FETCH_TIMEOUT_SECS="+bad,
 		)
 		out, err := cmd.CombinedOutput()
-		ee, ok := err.(*exec.ExitError)
-		if !ok || ee.ExitCode() != 2 {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 2 {
 			t.Errorf("fetch timeout %q: want exit 2, got err=%v\nout: %s", bad, err, out)
 		}
 		if !strings.Contains(string(out), "invalid GC_DOLT_SYNC_FETCH_TIMEOUT_SECS") {
