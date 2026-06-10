@@ -1519,6 +1519,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSession(*session, sp, name)
+					// gc-kkgak: a reconciler-owned drain ack is minted from the
+					// desired-state / assigned-work view. During a partial store
+					// query that view is unreliable, so defer the reconciler-owned
+					// cancel/stop decision until the store is healthy — same
+					// rationale as gc-hz0nu's orphan branch. Agent-sourced handoff
+					// acks are not reconciler-owned and fall through to stop
+					// promptly: their intent is explicit, not derived from the store.
+					if reconcilerOwnedAck && storeQueryPartial {
+						fmt.Fprintf(stdout, "Skipping reconciler drain-ack stop for '%s': store query partial (transient failure)\n", name) //nolint:errcheck
+						if trace != nil {
+							trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "store_query_partial", "deferred", traceRecordPayload{
+								"store_query_partial":  true,
+								"reconciler_owned_ack": true,
+							}, nil, "")
+						}
+						continue
+					}
 					if reconcilerOwnedAck && assignedWorkDrainReasonCancelable(ackReason) {
 						hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
 						if assignedErr != nil {

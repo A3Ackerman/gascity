@@ -956,6 +956,131 @@ func TestReconcileSessionBeads_DrainAckedOrphanStopDeferredWhenStoreQueryPartial
 	}
 }
 
+// TestReconcileSessionBeads_PreserveNamedReconcilerAckStopDeferredWhenStoreQueryPartial
+// is the gc-kkgak regression guard for the second (preserveNamed/named-session)
+// drain-ack block. A RECONCILER-owned drain ack is minted from the
+// desired-state/assigned-work view; under a partial store query that view is
+// unreliable, so the reconciler-owned stop must defer until the store is
+// healthy — the same reasoning as gc-hz0nu's orphan branch. Without the guard
+// the named session is async-stopped on degraded data.
+func TestReconcileSessionBeads_PreserveNamedReconcilerAckStopDeferredWhenStoreQueryPartial(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	// Reconciler-owned ack (source=reconciler), generation matches the bead's "1".
+	if err := setReconcilerDrainAckMetadata(env.sp, "worker", &drainState{reason: "orphaned", generation: 1}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		true, // storeQueryPartial
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state_reason"] == sessionpkg.DrainAckStopPendingReason {
+		t.Fatalf("reconciler-owned drain-ack marked stop-pending under storeQueryPartial; must defer (gc-kkgak)")
+	}
+	if got.Metadata["state"] == string(sessionpkg.StateDraining) {
+		t.Fatalf("state = draining under storeQueryPartial; reconciler-owned stop must defer (gc-kkgak)")
+	}
+}
+
+// TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial locks
+// the other half of gc-kkgak: an agent-sourced drain ack (NOT reconciler-owned —
+// an explicit `gc runtime drain-ack` handoff) must still stop promptly even
+// under storeQueryPartial. The agent's intent is explicit, not derived from the
+// degraded store, so the partial-store guard must not swallow it.
+func TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	// Plain agent ack: GC_DRAIN_ACK set, but no reconciler source metadata.
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		true, // storeQueryPartial — must NOT defer an agent-sourced ack
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state_reason"] != sessionpkg.DrainAckStopPendingReason {
+		t.Fatalf("agent-sourced drain-ack was deferred under storeQueryPartial (state_reason=%q); handoff acks must stop unconditionally (gc-kkgak)", got.Metadata["state_reason"])
+	}
+}
+
 func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := newBlockingStopProvider()
