@@ -1314,6 +1314,28 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			default:
 				if dops != nil {
 					if acked, _ := dops.isDrainAcked(name); acked {
+						// gc-hz0nu: every drain-acked decision below depends on the
+						// store-derived desired-state / assigned-work view. During a
+						// partial store query (transient Dolt failure) that view is
+						// incomplete, so an ack minted from it cannot be trusted to
+						// mean "orphaned". Defer the whole decision until the store is
+						// healthy — the same protection the plain drain path applies
+						// just below. Stopping a live session here on degraded data is
+						// what killed coordinator sessions on 2026-06-09.
+						if storeQueryPartial {
+							fmt.Fprintf(stdout, "Skipping drain-ack stop for '%s': store query partial (transient failure)\n", name) //nolint:errcheck
+							if trace != nil {
+								template := normalizedSessionTemplate(*session, cfg)
+								if template == "" {
+									template = session.Metadata["template"]
+								}
+								trace.recordDecision("reconciler.session.drain_ack", template, name, "store_query_partial", "deferred", traceRecordPayload{
+									"store_query_partial": true,
+									"provider_alive":      providerAlive,
+								}, nil, "")
+							}
+							continue
+						}
 						ackReason := assignedWorkDrainCancelReason(*session, sp, dt, name)
 						hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
 						if assignedErr != nil {

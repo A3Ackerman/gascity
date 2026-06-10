@@ -887,6 +887,75 @@ func TestReconcileSessionBeads_DrainAckMarksStopPendingAndStopsAsync(t *testing.
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckedOrphanStopDeferredWhenStoreQueryPartial is
+// the gc-hz0nu regression guard. During a transient store outage the desired /
+// assigned-work view is incomplete, so a live session can be misjudged as
+// orphaned and a drain ack minted from that degraded view. The drain-acked stop
+// path must NOT kill the session in that window — it has to defer, exactly like
+// the plain orphan-drain path already does when storeQueryPartial is set.
+// Without the guard this session gets marked stop-pending and async-stopped,
+// which is what killed king/dalinar/omp-crew/boot on 2026-06-09.
+func TestReconcileSessionBeads_DrainAckedOrphanStopDeferredWhenStoreQueryPartial(t *testing.T) {
+	env := newReconcilerTestEnv()
+	// "worker" is neither desired nor configured-named -> falls to the orphan
+	// (default) branch; provider is alive so the branch would async-stop it.
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,  // empty: not desired
+		map[string]bool{}, // not configured-named: not preserveNamed
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		true, // storeQueryPartial: store is degraded, ack can't be trusted
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state_reason"] == sessionpkg.DrainAckStopPendingReason {
+		t.Fatalf("drain-acked orphan marked stop-pending under storeQueryPartial; must defer until the store is healthy (gc-hz0nu)")
+	}
+	if got.Metadata["state"] == string(sessionpkg.StateDraining) {
+		t.Fatalf("state = draining under storeQueryPartial; live session must be preserved (gc-hz0nu)")
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed under storeQueryPartial; live session must be preserved (gc-hz0nu)")
+	}
+}
+
 func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := newBlockingStopProvider()
