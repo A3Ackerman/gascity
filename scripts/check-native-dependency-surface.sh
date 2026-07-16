@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-727}"
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-730}"
 max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-270000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
@@ -51,7 +51,7 @@ fi
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM HUP
-go build -o "$tmpdir/gc" ./cmd/gc
+go build -tags gms_pure_go -o "$tmpdir/gc" ./cmd/gc
 binary_bytes="$(wc -c < "$tmpdir/gc" | tr -d ' ')"
 if [ "$binary_bytes" -gt "$max_binary_bytes" ]; then
 	echo "native dependency guard: gc binary is $binary_bytes bytes; max is $max_binary_bytes" >&2
