@@ -126,6 +126,67 @@ func TestSessionLifecyclePayloadRegisteredForStoppedAndCrashed(t *testing.T) {
 	}
 }
 
+func TestControllerStoppedPayloadRoundTrip(t *testing.T) {
+	raw := ControllerStoppedPayloadJSON(ControllerStopReasonSupervisorShutdown, 42, "")
+
+	got, registered, err := events.DecodePayload(events.ControllerStopped, raw)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if !registered {
+		t.Fatal("registered = false, want true")
+	}
+	payload, ok := got.(ControllerStoppedPayload)
+	if !ok {
+		t.Fatalf("payload = %T, want ControllerStoppedPayload", got)
+	}
+	if payload.Reason != ControllerStopReasonSupervisorShutdown {
+		t.Fatalf("Reason = %q, want %q", payload.Reason, ControllerStopReasonSupervisorShutdown)
+	}
+	if payload.TriggerEvent != 42 {
+		t.Fatalf("TriggerEvent = %d, want 42", payload.TriggerEvent)
+	}
+	if payload.ExitErrorMessage != "" {
+		t.Fatalf("ExitErrorMessage = %q, want empty", payload.ExitErrorMessage)
+	}
+}
+
+func TestControllerStoppedPayloadOmitsOptionalFields(t *testing.T) {
+	raw := ControllerStoppedPayloadJSON(ControllerStopReasonUserStop, 0, "")
+	if got := string(raw); got != `{"reason":"user_stop"}` {
+		t.Fatalf("payload = %s, want only reason field", got)
+	}
+}
+
+func TestControllerStoppedPayloadRegistered(t *testing.T) {
+	sample, ok := events.LookupPayload(events.ControllerStopped)
+	if !ok {
+		t.Fatal("controller.stopped has no registered payload")
+	}
+	if _, ok := sample.(ControllerStoppedPayload); !ok {
+		t.Fatalf("payload sample = %T, want ControllerStoppedPayload", sample)
+	}
+}
+
+func TestDecodeWirePayloadDefaultsLegacyControllerStoppedToUnknown(t *testing.T) {
+	for _, raw := range []json.RawMessage{nil, json.RawMessage(`{}`)} {
+		decoded, registered, err := decodeWirePayload(events.ControllerStopped, raw)
+		if err != nil {
+			t.Fatalf("decodeWirePayload(%s): %v", raw, err)
+		}
+		if !registered {
+			t.Fatal("registered = false, want true")
+		}
+		payload, ok := decoded.(ControllerStoppedPayload)
+		if !ok {
+			t.Fatalf("payload = %T, want ControllerStoppedPayload", decoded)
+		}
+		if payload.Reason != ControllerStopReasonUnknown {
+			t.Fatalf("Reason = %q, want %q for legacy payload %s", payload.Reason, ControllerStopReasonUnknown, raw)
+		}
+	}
+}
+
 func TestDecodeBeadEventPayloadCoercesNonStringMetadata(t *testing.T) {
 	raw := json.RawMessage(`{"bead":{"id":"bd-123","title":"test bead","status":"open","issue_type":"session","created_at":"2026-04-26T21:37:46Z","metadata":{"generation":3,"pending_create_claim":true,"wake_attempts":0}}}`)
 

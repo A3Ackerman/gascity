@@ -69,6 +69,52 @@ func TestFileRecorderWritesEvent(t *testing.T) {
 	}
 }
 
+func TestFileRecorderRecordWithSeqReturnsAssignedSequence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	if got := rec.RecordWithSeq(Event{Type: ControllerStopped, Actor: "gc"}); got != 1 {
+		t.Fatalf("RecordWithSeq first seq = %d, want 1", got)
+	}
+	if got := rec.RecordWithSeq(Event{Type: ControllerStopped, Actor: "gc"}); got != 2 {
+		t.Fatalf("RecordWithSeq second seq = %d, want 2", got)
+	}
+}
+
+func TestFileRecorderRecordWithSeqReturnsZeroAfterClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := rec.RecordWithSeq(Event{Type: ControllerStopped, Actor: "gc"}); got != 0 {
+		t.Fatalf("RecordWithSeq after close = %d, want 0", got)
+	}
+	if !strings.Contains(stderr.String(), "recorder is closed") {
+		t.Fatalf("stderr = %q, want closed-recorder diagnostic", stderr.String())
+	}
+}
+
+func TestFakeRecordWithSeqReturnsAssignedSequence(t *testing.T) {
+	rec := NewFake()
+	if got := rec.RecordWithSeq(Event{Type: ControllerStopped, Actor: "gc"}); got != 1 {
+		t.Fatalf("RecordWithSeq first seq = %d, want 1", got)
+	}
+	if got := rec.RecordWithSeq(Event{Type: ControllerStopped, Actor: "gc"}); got != 2 {
+		t.Fatalf("RecordWithSeq second seq = %d, want 2", got)
+	}
+}
+
 func TestFileRecorderPayloadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")

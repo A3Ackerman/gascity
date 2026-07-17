@@ -1724,6 +1724,38 @@
         ],
         "type": "object"
       },
+      "ControllerStoppedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "exit_error_message": {
+            "description": "Crash or panic detail when reason=crash.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the per-city controller stopped.",
+            "enum": [
+              "supervisor_shutdown",
+              "user_stop",
+              "restart",
+              "crash",
+              "drain",
+              "config_reload",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "trigger_event": {
+            "description": "Sequence of the parent supervisor.shutdown_requested event, when applicable.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "type": "object"
+      },
       "ConversationGroupParticipant": {
         "additionalProperties": false,
         "properties": {
@@ -2375,6 +2407,9 @@
           },
           {
             "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ControllerStoppedPayload"
           },
           {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
@@ -13071,7 +13106,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/ControllerStoppedPayload"
           },
           "run_id": {
             "type": "string"
@@ -18472,7 +18507,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/ControllerStoppedPayload"
           },
           "run_id": {
             "type": "string"

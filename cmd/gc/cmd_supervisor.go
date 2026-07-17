@@ -419,14 +419,26 @@ func supervisorShutdownModeForSignal(sig os.Signal) supervisorShutdownMode {
 }
 
 type supervisorShutdownController struct {
+	requestMu            sync.Mutex
 	mode                 atomic.Int32
 	destructiveRequested atomic.Bool
 	destructiveOnce      sync.Once
 	destructiveCh        chan struct{}
+	triggerSeq           atomic.Uint64
 }
 
 func newSupervisorShutdownController() *supervisorShutdownController {
 	return &supervisorShutdownController{destructiveCh: make(chan struct{})}
+}
+
+func (c *supervisorShutdownController) setTriggerEventSeq(seq uint64) {
+	if seq != 0 {
+		c.triggerSeq.CompareAndSwap(0, seq)
+	}
+}
+
+func (c *supervisorShutdownController) triggerEventSeq() uint64 {
+	return c.triggerSeq.Load()
 }
 
 // shutdownTrigger carries the attribution for a supervisor shutdown so
@@ -452,6 +464,8 @@ func supervisorShutdownModeName(mode supervisorShutdownMode) string {
 }
 
 func requestSupervisorShutdown(stderr io.Writer, rec events.Recorder, shutdownCtl *supervisorShutdownController, cancel context.CancelFunc, mode supervisorShutdownMode, trigger shutdownTrigger) bool {
+	shutdownCtl.requestMu.Lock()
+	defer shutdownCtl.requestMu.Unlock()
 	modeName := supervisorShutdownModeName(mode)
 	// Plain-text breadcrumb to stderr -> ~/.gc/supervisor.log via the
 	// launchd/systemd-redirected stream. This is the canonical place
@@ -469,12 +483,17 @@ func requestSupervisorShutdown(stderr io.Writer, rec events.Recorder, shutdownCt
 		if err != nil {
 			fmt.Fprintf(stderr, "gc supervisor: marshal shutdown event: %v\n", err) //nolint:errcheck
 		} else {
-			rec.Record(events.Event{
+			event := events.Event{
 				Type:    events.SupervisorShutdownRequested,
 				Actor:   "supervisor",
 				Subject: "supervisor",
 				Payload: raw,
-			})
+			}
+			if sequenced, ok := rec.(interface{ RecordWithSeq(events.Event) uint64 }); ok {
+				shutdownCtl.setTriggerEventSeq(sequenced.RecordWithSeq(event))
+			} else {
+				rec.Record(event)
+			}
 		}
 	}
 	repeatedDestructive := shutdownCtl.request(mode)
@@ -1074,14 +1093,17 @@ func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 
 // managedCity tracks a running CityRuntime inside the supervisor.
 type managedCity struct {
-	cr         *CityRuntime
-	name       string // city name at launch — used for name-drift detection
-	started    bool
-	status     string
-	cancel     context.CancelFunc
-	done       chan struct{} // closed when the city goroutine exits
-	closer     io.Closer     // FileRecorder (or nil); closed on city stop
-	tombstoned atomic.Bool   // set before Remove() in shutdown paths for teardown safety
+	cr          *CityRuntime
+	name        string // city name at launch — used for name-drift detection
+	started     bool
+	status      string
+	rec         events.Recorder
+	stoppedOnce sync.Once
+	cancel      context.CancelFunc
+	done        chan struct{} // closed when the city goroutine exits
+	closer      io.Closer     // FileRecorder (or nil); closed on city stop
+	stopCause   controllerStopCause
+	tombstoned  atomic.Bool // set before Remove() in shutdown paths for teardown safety
 }
 
 // deleteManagedCityIfCurrent prevents a stale city goroutine from removing
@@ -1092,6 +1114,25 @@ func deleteManagedCityIfCurrent(cities map[string]*managedCity, path string, cur
 		return true
 	}
 	return false
+}
+
+func recordManagedCityStopped(rec events.Recorder, mc *managedCity) {
+	if mc == nil {
+		return
+	}
+	mc.stoppedOnce.Do(func() {
+		if rec != nil {
+			payload := mc.stopCause.payload()
+			rec.Record(events.Event{
+				Type:    events.ControllerStopped,
+				Actor:   "gc",
+				Payload: api.ControllerStoppedPayloadJSON(payload.Reason, payload.TriggerEvent, payload.ExitErrorMessage),
+			})
+		}
+		if mc.closer != nil {
+			mc.closer.Close() //nolint:errcheck
+		}
+	})
 }
 
 // managedCityStopTimeout returns the grace period for a city stop.
@@ -1115,14 +1156,16 @@ func managedCityForcedStopTimeout(mc *managedCity) time.Duration {
 
 // stopManagedCity cancels a city's context, waits up to its configured
 // grace period for it to exit, forces shutdown if it doesn't, and then
-// closes the bead provider and file recorder. It returns a non-nil error
-// when the city did not exit cleanly within the budget. Stderr still
-// receives a trace line for operability; the returned error is for
-// callers (runSupervisor) that need to aggregate shutdown status.
+// closes the bead provider. The city goroutine owns the event recorder until
+// it emits controller.stopped, so timeout paths intentionally leave it open.
+// It returns a non-nil error when the city did not exit cleanly within the
+// budget. Stderr still receives a trace line for operability; the returned
+// error is for callers (runSupervisor) that need to aggregate shutdown status.
 func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 	if mc == nil {
 		return nil
 	}
+	mc.stopCause.set(api.ControllerStopReasonUserStop, 0)
 	mc.cancel()
 	timeout := managedCityStopTimeout(mc)
 	var stopErr error
@@ -1132,9 +1175,7 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 			if err := shutdownBeadsProvider(cityPath); err != nil {
 				fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
 			}
-			if mc.closer != nil {
-				mc.closer.Close() //nolint:errcheck
-			}
+			recordManagedCityStopped(mc.rec, mc)
 			return nil
 		case <-time.After(timeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after cancel; forcing shutdown\n", mc.name, timeout) //nolint:errcheck
@@ -1151,22 +1192,31 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 		}()
 	}
 	forceTimeout := managedCityForcedStopTimeout(mc)
+	exited := false
 	if forceTimeout > 0 {
 		select {
 		case <-mc.done:
 			// Forced shutdown completed before the second timeout — the
 			// city is out. Clear the pending error so we report success.
 			stopErr = nil
+			exited = true
 		case <-time.After(forceTimeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
 			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
+		}
+	} else {
+		select {
+		case <-mc.done:
+			stopErr = nil
+			exited = true
+		default:
 		}
 	}
 	if err := shutdownBeadsProvider(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
 	}
-	if mc.closer != nil {
-		mc.closer.Close() //nolint:errcheck
+	if exited {
+		recordManagedCityStopped(mc.rec, mc)
 	}
 	return stopErr
 }
@@ -1178,13 +1228,16 @@ func stopManagedCityPreservingSessions(mc *managedCity, _ string, stderr io.Writ
 	if mc.cr != nil {
 		mc.cr.preserveSessionsOnShutdown()
 	}
+	mc.stopCause.set(api.ControllerStopReasonUserStop, 0)
 	mc.cancel()
 	timeout := managedCityStopTimeout(mc)
 	var stopErr error
+	exited := false
 	waitForRuntimeShutdown := timeout <= 0
 	if timeout > 0 {
 		select {
 		case <-mc.done:
+			exited = true
 		case <-time.After(timeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode cancel\n", mc.name, timeout) //nolint:errcheck
 			stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode cancel", mc.name, timeout)
@@ -1200,14 +1253,21 @@ func stopManagedCityPreservingSessions(mc *managedCity, _ string, stderr io.Writ
 			select {
 			case <-mc.done:
 				stopErr = nil
+				exited = true
 			case <-time.After(timeout):
 				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode shutdown wait\n", mc.name, timeout) //nolint:errcheck
 				stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode shutdown wait", mc.name, timeout)
 			}
+		} else {
+			select {
+			case <-mc.done:
+				exited = true
+			default:
+			}
 		}
 	}
-	if mc.closer != nil {
-		mc.closer.Close() //nolint:errcheck
+	if exited {
+		recordManagedCityStopped(mc.rec, mc)
 	}
 	return stopErr
 }
@@ -1576,6 +1636,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			preserveSessions := shutdownCtl.preservesSessionsAfterSettle(supervisorShutdownSettleDelay)
 			var stopFailures []string
 			for name, mc := range toStop {
+				mc.stopCause.set(api.ControllerStopReasonSupervisorShutdown, shutdownCtl.triggerEventSeq())
 				if preserveSessions {
 					fmt.Fprintf(stdout, "Preserving city '%s' sessions for re-adoption...\n", name) //nolint:errcheck
 				} else {
@@ -1791,6 +1852,7 @@ func reconcileCities(
 				if entry.EffectiveName() != mc.name {
 					nameDriftPaths = append(nameDriftPaths, path)
 					nameDriftCities = append(nameDriftCities, mc)
+					mc.stopCause.set(api.ControllerStopReasonRestart, 0)
 					delete(cities, path)
 				}
 			}
@@ -2094,7 +2156,11 @@ func reconcileCities(
 		reloadReqCh := make(chan reloadRequest)
 		cityCtx, cityCancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
-		mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}
+		mc := &managedCity{name: cityName, done: done, closer: fr, rec: rec}
+		mc.cancel = func() {
+			mc.stopCause.set(api.ControllerStopReasonUserStop, 0)
+			cityCancel()
+		}
 
 		convergenceReqCh := make(chan convergenceRequest, 16)
 		controlDispatcherCh := make(chan struct{}, 1)
@@ -2261,7 +2327,7 @@ func reconcileCities(
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.
 		sockPath := controllerSocketPath(path)
-		lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+		lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, mc.cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 		if lisErr != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 			lock.Close()                                                                               //nolint:errcheck // no socket to race with
@@ -2346,12 +2412,15 @@ func reconcileCities(
 			ul.SetUnlinkOnClose(false)
 		}
 
-		go func(n, p string, cityFr *events.FileRecorder, l net.Listener, sock string, origSockInfo os.FileInfo, lk *os.File) {
+		rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
+		telemetry.RecordControllerLifecycle(context.Background(), "started")
+		go func(n, p string, cityRec events.Recorder, l net.Listener, sock string, origSockInfo os.FileInfo, lk *os.File) {
 			// Recovery and close(done) defer is pushed FIRST so it
 			// executes LAST (Go LIFO), preserving the invariant that
 			// completion is signaled only after all resource cleanup.
 			defer func() {
 				if r := recover(); r != nil {
+					mc.stopCause.setCrash(fmt.Sprintf("panic: %v", r))
 					fmt.Fprintf(stderr, "gc supervisor: city '%s' panicked: %v\n", n, r) //nolint:errcheck
 					reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(p)
 					if consumeErr != nil {
@@ -2376,11 +2445,6 @@ func reconcileCities(
 					}()
 					if err := shutdownBeadsProvider(p); err != nil {
 						fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, err) //nolint:errcheck
-					}
-					// Close the file recorder (only on panic — normal exit
-					// leaves it for the external caller via mc.closer).
-					if cityFr != nil {
-						cityFr.Close() //nolint:errcheck
 					}
 					// Record panic for crash-loop backoff and remove from
 					// cities map in a single batch update.
@@ -2422,6 +2486,7 @@ func reconcileCities(
 						deleteManagedCityIfCurrent(cities, p, mc)
 					})
 				}
+				recordManagedCityStopped(cityRec, mc)
 				// Signal completion last — ensures all cleanup is done before
 				// waiters (shutdown/unregister paths) proceed.
 				close(done)
@@ -2446,10 +2511,8 @@ func reconcileCities(
 			defer l.Close() //nolint:errcheck // close listener (after socket removal)
 			defer telemetry.RecordControllerLifecycle(context.Background(), "stopped")
 			cityRuntime.run(cityCtx)
-		}(cityName, path, fr, lis, sockPath, sockInfo, lock)
+		}(cityName, path, rec, lis, sockPath, sockInfo, lock)
 
-		rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
-		telemetry.RecordControllerLifecycle(context.Background(), "started")
 		fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
 	}
 }

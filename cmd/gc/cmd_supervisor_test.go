@@ -4559,7 +4559,7 @@ func TestDoStartRejectsStandaloneOnlyFlagsUnderSupervisor(t *testing.T) {
 	}
 }
 
-func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
+func TestStopManagedCityLeavesRecorderOpenAfterTimeout(t *testing.T) {
 	cityPath := t.TempDir()
 	logFile := filepath.Join(t.TempDir(), "ops.log")
 	script := writeSpyScript(t, logFile)
@@ -4568,11 +4568,13 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 
 	closer := &closerSpy{}
 	forceStop := &atomic.Bool{}
+	rec := events.NewFake()
 	mc := &managedCity{
 		name:   "bright-lights",
 		cancel: func() {},
 		done:   make(chan struct{}),
 		closer: closer,
+		rec:    rec,
 		cr: &CityRuntime{
 			cfg: &config.City{
 				Session: config.SessionConfig{StartupTimeout: "20ms"},
@@ -4604,8 +4606,11 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	if !strings.Contains(stderr.String(), "did not exit within") {
 		t.Fatalf("stderr = %q, want forced-timeout warning", stderr.String())
 	}
-	if !closer.closed {
-		t.Fatal("expected closer to be closed after forced cleanup")
+	if closer.closed {
+		t.Fatal("recorder closed while city goroutine is still running")
+	}
+	if len(rec.Events) != 0 {
+		t.Fatalf("terminal events = %#v, want none before city exits", rec.Events)
 	}
 	if !forceStop.Load() {
 		t.Fatal("expected forced cleanup to request force-stop shutdown")
@@ -4706,8 +4711,8 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	if !strings.Contains(stderr.String(), "20ms") {
 		t.Fatalf("stderr = %q, want shutdown-timeout warning", stderr.String())
 	}
-	if !closer.closed {
-		t.Fatal("expected closer to be closed after forced cleanup")
+	if closer.closed {
+		t.Fatal("recorder closed while city goroutine is still running")
 	}
 
 	ops := readOpLog(t, logFile)
@@ -4775,6 +4780,29 @@ func TestCityRuntimeShutdownPreserveModeRecordsTrace(t *testing.T) {
 			record.Fields["reason"] == "supervisor_shutdown_preserve_mode"
 	}) {
 		t.Fatalf("trace records missing preserve shutdown cycle result: %#v", records)
+	}
+}
+
+func TestStopManagedCityPreservingSessionsLeavesRecorderOpenAfterTimeout(t *testing.T) {
+	closer := &closerSpy{}
+	mc := &managedCity{
+		name:   "bright-lights",
+		cancel: func() {},
+		done:   make(chan struct{}),
+		closer: closer,
+		cr: &CityRuntime{
+			cfg: &config.City{Daemon: config.DaemonConfig{ShutdownTimeout: "10ms"}},
+			sp:  runtime.NewFake(),
+			rec: events.Discard,
+		},
+	}
+
+	var stderr bytes.Buffer
+	if err := stopManagedCityPreservingSessions(mc, "", &stderr); err == nil {
+		t.Fatal("stopManagedCityPreservingSessions() error = nil, want timeout")
+	}
+	if closer.closed {
+		t.Fatal("recorder closed while preserve-mode city goroutine is still running")
 	}
 }
 
@@ -5086,6 +5114,50 @@ func TestRequestSupervisorShutdownRecordsBreadcrumbAndEvent(t *testing.T) {
 	}
 	if payload.Source != "signal" || payload.Signal != "terminated" || payload.ClientAddr != "" || payload.Mode != "preserve_sessions" {
 		t.Fatalf("payload = %+v, want signal/terminated/empty/preserve_sessions", payload)
+	}
+	if got := ctl.triggerEventSeq(); got != event.Seq {
+		t.Fatalf("trigger event seq = %d, want recorded supervisor seq %d", got, event.Seq)
+	}
+}
+
+func TestRecordManagedCityStoppedIncludesSupervisorTrigger(t *testing.T) {
+	rec := events.NewFake()
+	mc := &managedCity{}
+	mc.stopCause.set(api.ControllerStopReasonSupervisorShutdown, 17)
+
+	recordManagedCityStopped(rec, mc)
+	recordManagedCityStopped(rec, mc)
+
+	if len(rec.Events) != 1 {
+		t.Fatalf("recorded events = %d, want 1", len(rec.Events))
+	}
+	event := rec.Events[0]
+	if event.Type != events.ControllerStopped {
+		t.Fatalf("event.Type = %q, want %q", event.Type, events.ControllerStopped)
+	}
+	var payload api.ControllerStoppedPayload
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatalf("Unmarshal payload: %v", err)
+	}
+	if payload.Reason != api.ControllerStopReasonSupervisorShutdown || payload.TriggerEvent != 17 || payload.ExitErrorMessage != "" {
+		t.Fatalf("payload = %+v, want supervisor_shutdown/17/empty", payload)
+	}
+}
+
+func TestRecordManagedCityStoppedCrashIncludesError(t *testing.T) {
+	rec := events.NewFake()
+	mc := &managedCity{}
+	mc.stopCause.set(api.ControllerStopReasonUserStop, 0)
+	mc.stopCause.setCrash("runtime panic: boom")
+
+	recordManagedCityStopped(rec, mc)
+
+	var payload api.ControllerStoppedPayload
+	if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+		t.Fatalf("Unmarshal payload: %v", err)
+	}
+	if payload.Reason != api.ControllerStopReasonCrash || payload.ExitErrorMessage != "runtime panic: boom" {
+		t.Fatalf("payload = %+v, want crash with panic detail", payload)
 	}
 }
 

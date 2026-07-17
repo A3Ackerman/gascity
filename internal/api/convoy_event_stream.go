@@ -84,12 +84,25 @@ func (WireTaggedEvent) Schema(r huma.Registry) *huma.Schema {
 	return typedTaggedEventStreamEnvelopeSchema{}.Schema(r)
 }
 
+func decodeWirePayload(eventType string, raw json.RawMessage) (any, bool, error) {
+	decoded, registered, err := events.DecodePayload(eventType, raw)
+	if err != nil || !registered || eventType != events.ControllerStopped {
+		return decoded, registered, err
+	}
+	payload, ok := decoded.(ControllerStoppedPayload)
+	if ok && payload.Reason == "" {
+		payload.Reason = ControllerStopReasonUnknown
+		decoded = payload
+	}
+	return decoded, registered, nil
+}
+
 // toWireEvent decodes the bus's opaque Payload into the registered typed
 // variant when one exists. Custom event types are still part of the public
 // event contract because `gc event emit` accepts them, so they pass through
 // under the schema's custom-event branch.
 func toWireEvent(e events.Event) (WireEvent, bool) {
-	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
+	decoded, registered, err := decodeWirePayload(e.Type, e.Payload)
 	if err != nil {
 		log.Printf("api: events wire: decode payload for %q seq=%d: %v", e.Type, e.Seq, err)
 		return WireEvent{}, false
@@ -223,7 +236,7 @@ func (EventPayloadUnion) Schema(r huma.Registry) *huma.Schema {
 // wireEventFrom decodes the bus's opaque Payload into the registered typed
 // variant when one exists and otherwise emits a custom-event envelope.
 func wireEventFrom(e events.Event, workflow *workflowEventProjection) (eventStreamEnvelope, error) {
-	decoded, registered, err := events.DecodePayload(e.Type, e.Payload)
+	decoded, registered, err := decodeWirePayload(e.Type, e.Payload)
 	if err != nil {
 		return eventStreamEnvelope{}, fmt.Errorf("decode %s payload: %w", e.Type, err)
 	}
@@ -252,7 +265,7 @@ func wireEventFrom(e events.Event, workflow *workflowEventProjection) (eventStre
 
 // wireTaggedEventFrom is the supervisor-scope analog of wireEventFrom.
 func wireTaggedEventFrom(te events.TaggedEvent, workflow *workflowEventProjection) (taggedEventStreamEnvelope, error) {
-	decoded, registered, err := events.DecodePayload(te.Type, te.Payload)
+	decoded, registered, err := decodeWirePayload(te.Type, te.Payload)
 	if err != nil {
 		return taggedEventStreamEnvelope{}, fmt.Errorf("decode %s payload: %w", te.Type, err)
 	}

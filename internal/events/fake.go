@@ -32,6 +32,11 @@ func NewFailFake() *Fake {
 
 // Record appends the event to the Events slice. Auto-fills Seq and Ts.
 func (f *Fake) Record(e Event) {
+	f.RecordWithSeq(e)
+}
+
+// RecordWithSeq appends an event and returns its assigned sequence.
+func (f *Fake) RecordWithSeq(e Event) uint64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.seq++
@@ -44,6 +49,7 @@ func (f *Fake) Record(e Event) {
 		close(f.notify)
 	}
 	f.notify = make(chan struct{})
+	return e.Seq
 }
 
 // List returns events matching the filter from the in-memory store.

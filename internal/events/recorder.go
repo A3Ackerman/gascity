@@ -202,11 +202,17 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 // if the file has crossed the threshold since the last check. Auto
 // rotation is amortized — see WithRotationCheckRecords / Interval.
 func (r *FileRecorder) Record(e Event) {
+	r.RecordWithSeq(e)
+}
+
+// RecordWithSeq appends an event and returns its assigned sequence. It keeps
+// Record's best-effort contract: failures are logged and return zero.
+func (r *FileRecorder) RecordWithSeq(e Event) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	if r.closed {
-		return
+		fmt.Fprintln(r.stderr, "events: recorder is closed") //nolint:errcheck // best-effort stderr
+		return 0
 	}
 
 	r.maybeAutoRotateLocked()
@@ -218,7 +224,7 @@ func (r *FileRecorder) Record(e Event) {
 	fd := int(r.file.Fd())
 	if err := lockRecorderFile(fd, r.path); err != nil {
 		fmt.Fprintf(r.stderr, "events: lock: %v\n", err) //nolint:errcheck // best-effort stderr
-		return
+		return 0
 	}
 	defer func() {
 		if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
@@ -228,7 +234,9 @@ func (r *FileRecorder) Record(e Event) {
 
 	if err := r.writeRecordLocked(&e); err != nil {
 		fmt.Fprintf(r.stderr, "events: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 0
 	}
+	return e.Seq
 }
 
 // AppendBatch strictly appends a complete event batch under one mutex and one

@@ -90,7 +90,7 @@ gc start --foreground
   └─ shutdown:
         ├─ orderDispatcher.drain(ctx) →  wait for in-flight order goroutines
         ├─ gracefulStopAll()         →  interrupt → wait → kill
-        ├─ record controller.stopped event
+        ├─ record typed controller.stopped reason + parent supervisor event
         └─ release lock + remove socket + pid
 ```
 
@@ -195,6 +195,10 @@ indicate bugs.
   always sends `Interrupt()` to all sessions before sleeping
   `shutdown_timeout` and calling `Stop()` on survivors. Zero timeout
   skips the grace period entirely.
+
+- **Every controller stop is attributed**: `controller.stopped` always carries
+  a non-empty reason. Supervisor-triggered city stops reference the initiating
+  `supervisor.shutdown_requested` sequence; panics carry the exit error text.
 
 - **Socket cleanup is best-effort**: The Unix socket at
   `.gc/controller.sock` is removed on startup (stale cleanup) and on

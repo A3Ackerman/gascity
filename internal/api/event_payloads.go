@@ -234,6 +234,42 @@ type SupervisorShutdownPayload struct {
 // IsEventPayload marks SupervisorShutdownPayload as an events.Payload variant.
 func (SupervisorShutdownPayload) IsEventPayload() {}
 
+// Controller stop reason values form the stable wire enum used by
+// ControllerStoppedPayload.
+const (
+	ControllerStopReasonSupervisorShutdown = "supervisor_shutdown"
+	ControllerStopReasonUserStop           = "user_stop"
+	ControllerStopReasonRestart            = "restart"
+	ControllerStopReasonCrash              = "crash"
+	ControllerStopReasonDrain              = "drain"
+	ControllerStopReasonConfigReload       = "config_reload"
+	ControllerStopReasonUnknown            = "unknown"
+)
+
+// ControllerStoppedPayload attributes a per-city controller shutdown.
+// TriggerEvent references the supervisor.shutdown_requested sequence when a
+// supervisor shutdown initiated the per-city stop. ExitErrorMessage is present
+// only when the controller exited because of a panic or another crash.
+type ControllerStoppedPayload struct {
+	Reason           string `json:"reason" enum:"supervisor_shutdown,user_stop,restart,crash,drain,config_reload,unknown" doc:"Why the per-city controller stopped."`
+	TriggerEvent     uint64 `json:"trigger_event,omitempty" doc:"Sequence of the parent supervisor.shutdown_requested event, when applicable."`
+	ExitErrorMessage string `json:"exit_error_message,omitempty" doc:"Crash or panic detail when reason=crash."`
+}
+
+// IsEventPayload marks ControllerStoppedPayload as an events.Payload variant.
+func (ControllerStoppedPayload) IsEventPayload() {}
+
+// ControllerStoppedPayloadJSON builds the JSON wire form of a
+// ControllerStoppedPayload for attachment to an events.Event.Payload field.
+func ControllerStoppedPayloadJSON(reason string, triggerEvent uint64, exitErrorMessage string) json.RawMessage {
+	b, _ := json.Marshal(ControllerStoppedPayload{
+		Reason:           reason,
+		TriggerEvent:     triggerEvent,
+		ExitErrorMessage: exitErrorMessage,
+	})
+	return b
+}
+
 // SupervisorRequestPayload is a bounded audit record for the machine-wide
 // supervisor API. It intentionally omits request bodies, query strings, raw
 // remote addresses, and origins.
@@ -623,12 +659,11 @@ func init() {
 	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeadAssigneeReopened, BeadDeadAssigneeReopenedPayload{})
 
-	// session.* / convoy.* / controller.* / city.* / order.* /
-	// provider.* — these events carry no structured payload today;
-	// their semantics are fully captured by the envelope's Actor,
-	// Subject, and Message fields. NoPayload registers an empty typed
-	// shape so the spec still emits a discriminated-union variant
-	// for the event type and the registry-coverage test passes.
+	// Events registered with NoPayload below carry no structured data today;
+	// their semantics are fully captured by the envelope's Actor, Subject, and
+	// Message fields. NoPayload keeps a typed discriminated-union variant in the
+	// generated schema. Events with richer contracts register their payload type
+	// alongside those reserved shapes.
 	events.RegisterPayload(events.SessionWoke, events.NoPayload{})
 	events.RegisterPayload(events.SessionStopped, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionCrashed, SessionLifecyclePayload{})
@@ -648,7 +683,7 @@ func init() {
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})
-	events.RegisterPayload(events.ControllerStopped, events.NoPayload{})
+	events.RegisterPayload(events.ControllerStopped, ControllerStoppedPayload{})
 	events.RegisterPayload(events.SupervisorStarted, SupervisorStartedPayload{})
 	events.RegisterPayload(events.SupervisorShutdownRequested, SupervisorShutdownPayload{})
 	events.RegisterPayload(events.SupervisorRequest, SupervisorRequestPayload{})

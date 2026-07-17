@@ -43,6 +43,63 @@ var (
 	errControllerUnresponsive   = errors.New("controller unresponsive")
 )
 
+type controllerStopCause struct {
+	mu               sync.Mutex
+	reason           string
+	triggerEvent     uint64
+	exitErrorMessage string
+}
+
+func (c *controllerStopCause) set(reason string, triggerEvent uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.reason != "" {
+		return
+	}
+	c.reason = reason
+	c.triggerEvent = triggerEvent
+}
+
+func (c *controllerStopCause) setCrash(exitErrorMessage string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reason = api.ControllerStopReasonCrash
+	c.triggerEvent = 0
+	c.exitErrorMessage = exitErrorMessage
+}
+
+func (c *controllerStopCause) payload() api.ControllerStoppedPayload {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	reason := c.reason
+	if reason == "" {
+		reason = api.ControllerStopReasonUnknown
+	}
+	return api.ControllerStoppedPayload{
+		Reason:           reason,
+		TriggerEvent:     c.triggerEvent,
+		ExitErrorMessage: c.exitErrorMessage,
+	}
+}
+
+func recordStandaloneControllerStoppedOnExit(rec events.Recorder, cause *controllerStopCause) {
+	if recovered := recover(); recovered != nil {
+		cause.setCrash(fmt.Sprintf("panic: %v", recovered))
+		recordControllerStopped(rec, cause)
+		panic(recovered)
+	}
+	recordControllerStopped(rec, cause)
+}
+
+func recordControllerStopped(rec events.Recorder, cause *controllerStopCause) {
+	payload := cause.payload()
+	rec.Record(events.Event{
+		Type:    events.ControllerStopped,
+		Actor:   "gc",
+		Payload: api.ControllerStoppedPayloadJSON(payload.Reason, payload.TriggerEvent, payload.ExitErrorMessage),
+	})
+}
+
 type controllerCommandError struct {
 	op           string
 	err          error
@@ -1303,13 +1360,18 @@ func runController(
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	stopCause := &controllerStopCause{}
+	requestUserStop := func() {
+		stopCause.set(api.ControllerStopReasonUserStop, 0)
+		cancel()
+	}
 
 	// Signal handler: SIGINT/SIGTERM → cancel.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		cancel()
+		requestUserStop()
 	}()
 
 	convergenceReqCh := make(chan convergenceRequest, 16)
@@ -1320,7 +1382,7 @@ func runController(
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, requestUserStop, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1350,6 +1412,7 @@ func runController(
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
+	defer recordStandaloneControllerStoppedOnExit(rec, stopCause)
 
 	cr, err := newCityRuntime(CityRuntimeParams{
 		CityPath:                cityPath,
@@ -1498,7 +1561,6 @@ func runController(
 	cr.run(ctx)
 	cr.shutdown()
 
-	rec.Record(events.Event{Type: events.ControllerStopped, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "stopped")
 	fmt.Fprintln(stdout, "Controller stopped.") //nolint:errcheck // best-effort stdout
 	return 0

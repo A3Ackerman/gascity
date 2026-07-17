@@ -3,7 +3,7 @@ title: "Event Bus"
 ---
 
 
-> Last verified against code: 2026-04-25
+> Last verified against code: 2026-07-16
 
 ## Summary
 
@@ -283,7 +283,7 @@ API/SSE projection:
 | `ConvoyCreated` | `convoy.created` | Convoy creation |
 | `ConvoyClosed` | `convoy.closed` | Convoy close |
 | `ControllerStarted` | `controller.started` | Per-city controller startup |
-| `ControllerStopped` | `controller.stopped` | Per-city controller shutdown |
+| `ControllerStopped` | `controller.stopped` | Per-city controller shutdown. Carries a typed reason (`supervisor_shutdown`, `user_stop`, `restart`, `crash`, `drain`, `config_reload`, or `unknown`), the parent `supervisor.shutdown_requested` sequence when applicable, and optional crash detail. |
 | `SupervisorStarted` | `supervisor.started` | Machine-wide supervisor process: emitted once per startup, classifying how the previous supervisor instance exited (`clean` — it completed its STOPPING path; `crash` — a prior instance ran but did not complete STOPPING; `unknown` — no evidence of a prior instance) from the clean-shutdown handoff token. Attribution is best-effort across binary up/downgrades: a mixed-version window can misattribute one start, self-correcting on the next cycle. |
 | `SupervisorShutdownRequested` | `supervisor.shutdown_requested` | Machine-wide supervisor process: emitted when a shutdown trigger is observed (SIGINT/SIGTERM or socket `stop`), before the cascade of per-city `controller.stopped` events. Carries trigger attribution (source, signal, client addr, mode). |
 | `SupervisorRequest` | `supervisor.request` | Machine-wide supervisor API bounded request audit. Omits request bodies, raw origins, raw remote addresses, and query strings. |

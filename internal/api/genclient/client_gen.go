@@ -60,6 +60,39 @@ func (e CityCreateRequestBootstrapProfile) Valid() bool {
 	}
 }
 
+// Defines values for ControllerStoppedPayloadReason.
+const (
+	ControllerStoppedPayloadReasonConfigReload       ControllerStoppedPayloadReason = "config_reload"
+	ControllerStoppedPayloadReasonCrash              ControllerStoppedPayloadReason = "crash"
+	ControllerStoppedPayloadReasonDrain              ControllerStoppedPayloadReason = "drain"
+	ControllerStoppedPayloadReasonRestart            ControllerStoppedPayloadReason = "restart"
+	ControllerStoppedPayloadReasonSupervisorShutdown ControllerStoppedPayloadReason = "supervisor_shutdown"
+	ControllerStoppedPayloadReasonUnknown            ControllerStoppedPayloadReason = "unknown"
+	ControllerStoppedPayloadReasonUserStop           ControllerStoppedPayloadReason = "user_stop"
+)
+
+// Valid indicates whether the value is a known member of the ControllerStoppedPayloadReason enum.
+func (e ControllerStoppedPayloadReason) Valid() bool {
+	switch e {
+	case ControllerStoppedPayloadReasonConfigReload:
+		return true
+	case ControllerStoppedPayloadReasonCrash:
+		return true
+	case ControllerStoppedPayloadReasonDrain:
+		return true
+	case ControllerStoppedPayloadReasonRestart:
+		return true
+	case ControllerStoppedPayloadReasonSupervisorShutdown:
+		return true
+	case ControllerStoppedPayloadReasonUnknown:
+		return true
+	case ControllerStoppedPayloadReasonUserStop:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ConversationKind.
 const (
 	Dm     ConversationKind = "dm"
@@ -683,19 +716,19 @@ func (e SupervisorShutdownPayloadSource) Valid() bool {
 
 // Defines values for SupervisorStartedPayloadPreviousExit.
 const (
-	Clean   SupervisorStartedPayloadPreviousExit = "clean"
-	Crash   SupervisorStartedPayloadPreviousExit = "crash"
-	Unknown SupervisorStartedPayloadPreviousExit = "unknown"
+	SupervisorStartedPayloadPreviousExitClean   SupervisorStartedPayloadPreviousExit = "clean"
+	SupervisorStartedPayloadPreviousExitCrash   SupervisorStartedPayloadPreviousExit = "crash"
+	SupervisorStartedPayloadPreviousExitUnknown SupervisorStartedPayloadPreviousExit = "unknown"
 )
 
 // Valid indicates whether the value is a known member of the SupervisorStartedPayloadPreviousExit enum.
 func (e SupervisorStartedPayloadPreviousExit) Valid() bool {
 	switch e {
-	case Clean:
+	case SupervisorStartedPayloadPreviousExitClean:
 		return true
-	case Crash:
+	case SupervisorStartedPayloadPreviousExitCrash:
 		return true
-	case Unknown:
+	case SupervisorStartedPayloadPreviousExitUnknown:
 		return true
 	default:
 		return false
@@ -1448,6 +1481,21 @@ type ConfigValidateOutputBody struct {
 	// Warnings Validation warnings.
 	Warnings *[]string `json:"warnings"`
 }
+
+// ControllerStoppedPayload defines model for ControllerStoppedPayload.
+type ControllerStoppedPayload struct {
+	// ExitErrorMessage Crash or panic detail when reason=crash.
+	ExitErrorMessage *string `json:"exit_error_message,omitempty"`
+
+	// Reason Why the per-city controller stopped.
+	Reason ControllerStoppedPayloadReason `json:"reason"`
+
+	// TriggerEvent Sequence of the parent supervisor.shutdown_requested event, when applicable.
+	TriggerEvent *int64 `json:"trigger_event,omitempty"`
+}
+
+// ControllerStoppedPayloadReason Why the per-city controller stopped.
+type ControllerStoppedPayloadReason string
 
 // ConversationGroupParticipant defines model for ConversationGroupParticipant.
 type ConversationGroupParticipant struct {
@@ -5426,7 +5474,7 @@ type TypedEventStreamEnvelopeControllerStopped struct {
 	Actor            string                   `json:"actor"`
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
-	Payload          NoPayload                `json:"payload"`
+	Payload          ControllerStoppedPayload `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -6822,7 +6870,7 @@ type TypedTaggedEventStreamEnvelopeControllerStopped struct {
 	City             string                   `json:"city"`
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
-	Payload          NoPayload                `json:"payload"`
+	Payload          ControllerStoppedPayload `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -9894,6 +9942,32 @@ func (t *EventPayload) FromConditionalWritesDegradedPayload(v ConditionalWritesD
 
 // MergeConditionalWritesDegradedPayload performs a merge with any union data inside the EventPayload, using the provided ConditionalWritesDegradedPayload
 func (t *EventPayload) MergeConditionalWritesDegradedPayload(v ConditionalWritesDegradedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsControllerStoppedPayload returns the union data inside the EventPayload as a ControllerStoppedPayload
+func (t EventPayload) AsControllerStoppedPayload() (ControllerStoppedPayload, error) {
+	var body ControllerStoppedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromControllerStoppedPayload overwrites any union data inside the EventPayload as the provided ControllerStoppedPayload
+func (t *EventPayload) FromControllerStoppedPayload(v ControllerStoppedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeControllerStoppedPayload performs a merge with any union data inside the EventPayload, using the provided ControllerStoppedPayload
+func (t *EventPayload) MergeControllerStoppedPayload(v ControllerStoppedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err

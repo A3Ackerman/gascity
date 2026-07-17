@@ -271,6 +271,20 @@ export const zConfigValidateOutputBody = z.object({
     warnings: z.array(z.string()).nullable()
 });
 
+export const zControllerStoppedPayload = z.object({
+    exit_error_message: z.string().optional(),
+    reason: z.enum([
+        'supervisor_shutdown',
+        'user_stop',
+        'restart',
+        'crash',
+        'drain',
+        'config_reload',
+        'unknown'
+    ]),
+    trigger_event: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
+});
+
 export const zConversationGroupParticipant = z.object({
     GroupID: z.string(),
     Handle: z.string(),
@@ -3221,6 +3235,7 @@ export const zEventPayload = z.union([
     zCityLifecyclePayload,
     zCityUnregisterSucceededPayload,
     zConditionalWritesDegradedPayload,
+    zControllerStoppedPayload,
     zGroupCreatedEventPayload,
     zInboundEventPayload,
     zMailEventPayload,
@@ -3606,7 +3621,7 @@ export const zTypedEventStreamEnvelopeControllerStopped = z.object({
     actor: z.string(),
     depends_on_step_ids: z.array(z.string()).optional(),
     message: z.string().optional(),
-    payload: zNoPayload,
+    payload: zControllerStoppedPayload,
     run_id: z.string().optional(),
     seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     session_id: z.string().optional(),
@@ -5271,7 +5286,7 @@ export const zTypedTaggedEventStreamEnvelopeControllerStopped = z.object({
     city: z.string(),
     depends_on_step_ids: z.array(z.string()).optional(),
     message: z.string().optional(),
-    payload: zNoPayload,
+    payload: zControllerStoppedPayload,
     run_id: z.string().optional(),
     seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     session_id: z.string().optional(),

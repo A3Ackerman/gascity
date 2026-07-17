@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -173,6 +174,7 @@ func TestControllerShutdown(t *testing.T) {
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
 	var stdout, stderr lockedBuffer
+	rec := events.NewFake()
 
 	// Run controller in a goroutine; it will block until canceled.
 	// Use a close-able channel so cleanup can detect whether the
@@ -180,7 +182,7 @@ func TestControllerShutdown(t *testing.T) {
 	done := make(chan struct{})
 	var exitCode int
 	go func() {
-		exitCode = runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		exitCode = runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, rec, nil, &stdout, &stderr)
 		close(done)
 	}()
 
@@ -205,6 +207,64 @@ func TestControllerShutdown(t *testing.T) {
 	// Agent should have been stopped during shutdown.
 	if sp.IsRunning("mayor") {
 		t.Error("agent should be stopped after controller shutdown")
+	}
+	var stopped events.Event
+	for _, event := range rec.Events {
+		if event.Type == events.ControllerStopped {
+			stopped = event
+			break
+		}
+	}
+	if stopped.Type == "" {
+		t.Fatal("controller.stopped event was not recorded")
+	}
+	var payload api.ControllerStoppedPayload
+	if err := json.Unmarshal(stopped.Payload, &payload); err != nil {
+		t.Fatalf("decode controller.stopped payload: %v", err)
+	}
+	if payload.Reason != api.ControllerStopReasonUserStop {
+		t.Fatalf("controller.stopped reason = %q, want %q", payload.Reason, api.ControllerStopReasonUserStop)
+	}
+}
+
+func TestRecordStandaloneControllerStoppedOnExitRecordsUnknownReason(t *testing.T) {
+	rec := events.NewFake()
+	func() {
+		defer recordStandaloneControllerStoppedOnExit(rec, &controllerStopCause{})
+	}()
+
+	if len(rec.Events) != 1 {
+		t.Fatalf("recorded events = %d, want 1", len(rec.Events))
+	}
+	var payload api.ControllerStoppedPayload
+	if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+		t.Fatalf("decode controller.stopped payload: %v", err)
+	}
+	if payload.Reason != api.ControllerStopReasonUnknown {
+		t.Fatalf("reason = %q, want %q", payload.Reason, api.ControllerStopReasonUnknown)
+	}
+}
+
+func TestRecordStandaloneControllerStoppedOnExitRecordsCrashAndRepanics(t *testing.T) {
+	rec := events.NewFake()
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		func() {
+			defer recordStandaloneControllerStoppedOnExit(rec, &controllerStopCause{})
+			panic("boom")
+		}()
+	}()
+
+	if recovered != "boom" {
+		t.Fatalf("recovered = %v, want boom", recovered)
+	}
+	var payload api.ControllerStoppedPayload
+	if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+		t.Fatalf("decode controller.stopped payload: %v", err)
+	}
+	if payload.Reason != api.ControllerStopReasonCrash || payload.ExitErrorMessage != "panic: boom" {
+		t.Fatalf("payload = %+v, want crash with panic detail", payload)
 	}
 }
 
