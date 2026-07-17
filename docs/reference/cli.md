@@ -2400,6 +2400,7 @@ gc mail send --all "Status update: tests passing"
 |------|------|---------|-------------|
 | `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
 | `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
+| `--idempotency-key` | string |  | idempotency key for safe remote retries |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
 | `--notify` | bool |  | nudge the recipient about this message, even if earlier mail is still unread |

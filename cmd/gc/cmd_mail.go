@@ -1398,6 +1398,7 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var subject string
 	var message string
 	var jsonOut bool
+	var idempotencyKey string
 	cmd := &cobra.Command{
 		Use:   "send [<to>] [<body>]",
 		Short: "Send a message to a session alias or human",
@@ -1419,8 +1420,8 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			code := 0
-			if jsonOut {
-				code = cmdMailSendJSON(args, notify, all, from, to, subject, message, true, stdout, stderr)
+			if jsonOut || idempotencyKey != "" {
+				code = cmdMailSendWithIdempotencyJSON(args, notify, all, from, to, subject, message, idempotencyKey, jsonOut, stdout, stderr)
 			} else {
 				code = cmdMailSend(args, notify, all, from, to, subject, message, stdout, stderr)
 			}
@@ -1438,6 +1439,7 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 	cmd.Flags().StringVar(&to, "to", "", "recipient address (alternative to positional argument)")
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "message subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "message body text")
+	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "idempotency key for safe remote retries")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
 	cmd.MarkFlagsMutuallyExclusive("to", "all")
 	return cmd
@@ -1653,6 +1655,46 @@ The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".`,
 	return cmd
 }
 
+var resolveMailSendWriteTarget = resolveWriteTarget
+
+func prepareMailSendArgs(args []string, all bool, to, subject, message string, stderr io.Writer) ([]string, bool) {
+	if to != "" && !all {
+		args = append([]string{to}, args...)
+	}
+	if subject == "" && message == "" {
+		return args, true
+	}
+	if all {
+		allBody := message
+		if allBody == "" && len(args) > 0 {
+			allBody = args[0]
+		}
+		return []string{subject, allBody}, true
+	}
+	if len(args) < 1 {
+		fmt.Fprintln(stderr, "gc mail send: missing recipient") //nolint:errcheck // best-effort stderr
+		return nil, false
+	}
+	body := message
+	if body == "" && len(args) > 1 {
+		body = strings.Join(args[1:], " ")
+	}
+	return []string{args[0], subject, body}, true
+}
+
+func hasWhitespace(s string) bool {
+	return strings.IndexFunc(s, unicode.IsSpace) >= 0
+}
+
+func remoteMailSenderValid(sender string) bool {
+	if sender != strings.TrimSpace(sender) {
+		return false
+	}
+	parts := strings.Split(sender, "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] != "" &&
+		!hasWhitespace(parts[0]) && !hasWhitespace(parts[1])
+}
+
 // cmdMailSend is the CLI entry point for sending mail. It opens the provider,
 // resolves session mailbox identities, and delegates to doMailSend.
 // The to parameter is the --to flag value (empty if not set).
@@ -1661,6 +1703,31 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 }
 
 func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, jsonOut bool, stdout, stderr io.Writer) int {
+	return cmdMailSendWithIdempotencyJSON(args, notify, all, from, to, subject, message, "", jsonOut, stdout, stderr)
+}
+
+func cmdMailSendWithIdempotencyJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, idempotencyKey string, jsonOut bool, stdout, stderr io.Writer) int {
+	prepared, ok := prepareMailSendArgs(args, all, to, subject, message, stderr)
+	if !ok {
+		return 1
+	}
+	remoteC, isRemote, _, resolveErr := resolveMailSendWriteTarget()
+	if resolveErr != nil {
+		selection := readRemoteSelection()
+		allowStorelessLocal := !isRemote && !selection.hasExplicitRemote() && strings.HasPrefix(os.Getenv("GC_MAIL"), "exec:")
+		if !allowStorelessLocal {
+			fmt.Fprintf(stderr, "gc mail send: %v\n", resolveErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+	if isRemote {
+		return cmdMailSendRemoteJSON(remoteC, prepared, notify, all, from, idempotencyKey, jsonOut, stdout, stderr)
+	}
+	if idempotencyKey != "" {
+		fmt.Fprintln(stderr, "gc mail send: --idempotency-key requires a remote city target (--context/--city-url)") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	args = prepared
 	mp, code := openCityMailProvider(stderr, "gc mail send")
 	if mp == nil {
 		return code
@@ -1719,31 +1786,6 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 		nf = newMailNudgeFunc(sender)
 	}
 
-	// When --to is set, prepend it to args so doMailSend sees [to, body].
-	if to != "" && !all {
-		args = append([]string{to}, args...)
-	}
-
-	// When -s/-m flags provide subject/body, use them.
-	if subject != "" || message != "" {
-		if all {
-			allBody := message
-			if allBody == "" && len(args) > 0 {
-				allBody = args[0]
-			}
-			args = []string{subject, allBody}
-		} else {
-			if len(args) < 1 {
-				fmt.Fprintln(stderr, "gc mail send: missing recipient") //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			body := message
-			if body == "" && len(args) > 1 {
-				body = strings.Join(args[1:], " ")
-			}
-			args = []string{args[0], subject, body}
-		}
-	}
 	if !all && len(args) > 0 && store != nil {
 		canonicalTo, err := resolveMailRecipientIdentityCached(cityPath, cfg, store, args[0], idCache)
 		if err != nil {
@@ -1763,6 +1805,55 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 
 	rec := openCityRecorder(stderr)
 	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, jsonOut, stdout, stderr)
+}
+
+func cmdMailSendRemoteJSON(client *api.Client, args []string, notify, all bool, sender, idempotencyKey string, jsonOut bool, stdout, stderr io.Writer) int {
+	if notify {
+		fmt.Fprintln(stderr, "gc mail send: --notify is not supported for remote mail send") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if all {
+		fmt.Fprintln(stderr, "gc mail send: --all is not supported for remote mail send") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if sender == "" {
+		fmt.Fprintln(stderr, "gc mail send: remote mail send requires --from <town>/<agent>") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !remoteMailSenderValid(sender) {
+		fmt.Fprintln(stderr, "gc mail send: remote --from must be a town-qualified internal identity (<town>/<agent>)") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if len(args) < 2 {
+		fmt.Fprintln(stderr, "gc mail send: usage: gc mail send <to> <body>  OR  gc mail send <to> -s <subject> [-m <body>]") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	recipient := args[0]
+	var subject, body string
+	if len(args) >= 3 {
+		subject = args[1]
+		body = args[2]
+	} else {
+		body = strings.Join(args[1:], " ")
+		if subject == "" {
+			subject = body
+		}
+	}
+	msg, err := client.SendMail(sender, recipient, subject, body, idempotencyKey)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return renderMailSendResult(msg, msg.To, false, jsonOut, stdout, stderr)
+}
+
+func renderMailSendResult(msg mail.Message, recipient string, notified, jsonOut bool, stdout, stderr io.Writer) int {
+	if !jsonOut {
+		fmt.Fprintf(stdout, "Sent message %s to %s\n", msg.ID, recipient) //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	summary := summarizeMailMessage(msg)
+	return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: msg.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
 }
 
 // doMailSend creates a message addressed to a recipient. args is [to, subject, body]
@@ -1807,9 +1898,6 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		Message: to,
 		Payload: mailEventPayload(&m),
 	})
-	if !jsonOut {
-		fmt.Fprintf(stdout, "Sent message %s to %s\n", m.ID, to) //nolint:errcheck // best-effort stdout
-	}
 
 	// Nudge recipient if requested and recipient is not human.
 	notified := false
@@ -1820,11 +1908,7 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 			notified = true
 		}
 	}
-	if jsonOut {
-		summary := summarizeMailMessage(m)
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
-	}
-	return 0
+	return renderMailSendResult(m, to, notified, jsonOut, stdout, stderr)
 }
 
 // doMailSendAll broadcasts a message to all live session mailboxes (excluding the

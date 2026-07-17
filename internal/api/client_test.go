@@ -64,6 +64,80 @@ func TestClientSuspendCity(t *testing.T) {
 	}
 }
 
+func TestClientSendMailReturnsCreatedMessageAndForwardsIdempotencyKey(t *testing.T) {
+	var gotBody map[string]any
+	var gotIdempotencyKey string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIdempotencyKey = r.Header.Get("Idempotency-Key")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"msg-1","from":"alex/dalinar","to":"myrig/worker","subject":"Status","body":"Build is green","created_at":"2026-07-17T00:00:00Z","read":false}`))
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	msg, err := c.SendMail("alex/dalinar", "myrig/worker", "Status", "Build is green", "mail-1")
+	if err != nil {
+		t.Fatalf("SendMail: %v", err)
+	}
+	if msg.ID != "msg-1" || msg.From != "alex/dalinar" || msg.To != "myrig/worker" {
+		t.Fatalf("message = %+v", msg)
+	}
+	if gotIdempotencyKey != "mail-1" {
+		t.Fatalf("Idempotency-Key = %q, want mail-1", gotIdempotencyKey)
+	}
+	if gotBody["from"] != "alex/dalinar" || gotBody["to"] != "myrig/worker" || gotBody["subject"] != "Status" || gotBody["body"] != "Build is green" {
+		t.Fatalf("request body = %#v", gotBody)
+	}
+}
+
+func TestClientSendMailReturnsTypedAPIError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"title":"Not Found","status":404,"detail":"mail_recipient_not_found: missing recipient"}`))
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.SendMail("alex/dalinar", "missing", "Status", "Build is green", "")
+	if err == nil {
+		t.Fatal("SendMail succeeded, want typed API error")
+	}
+	if got := err.Error(); got != "API error: mail_recipient_not_found: missing recipient" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestClientSendMailIdempotentReplayCreatesOneMessage(t *testing.T) {
+	state := newFakeState(t)
+	ts := httptest.NewServer(newTestCityHandler(t, state))
+	defer ts.Close()
+	c := NewCityScopedClient(ts.URL, state.CityName())
+
+	first, err := c.SendMail("alex/dalinar", "myrig/worker", "Status", "Build is green", "mail-replay-1")
+	if err != nil {
+		t.Fatalf("first SendMail: %v", err)
+	}
+	second, err := c.SendMail("alex/dalinar", "myrig/worker", "Status", "Build is green", "mail-replay-1")
+	if err != nil {
+		t.Fatalf("second SendMail: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("replay ID = %q, want %q", second.ID, first.ID)
+	}
+	messages, err := state.cityMailProv.Inbox("myrig/worker")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want one idempotent send", len(messages))
+	}
+}
+
 func TestClientWaitForEventRequestsReplayCursorForCityStream(t *testing.T) {
 	seen := make(chan url.Values, 1)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

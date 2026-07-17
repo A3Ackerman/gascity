@@ -239,6 +239,221 @@ func TestMailSendAgentToAgent(t *testing.T) {
 	}
 }
 
+func TestCmdMailSendRemoteUsesAPIWithoutLocalFallback(t *testing.T) {
+	var requests int
+	var gotIdempotencyKey string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		gotIdempotencyKey = r.Header.Get("Idempotency-Key")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"msg-remote","from":"alex/dalinar","to":"myrig/worker","subject":"Status","body":"Build is green","created_at":"2026-07-17T00:00:00Z","read":false}`))
+	}))
+	defer srv.Close()
+	client := api.NewCityScopedClient(srv.URL, "remote-city")
+	oldResolve := resolveMailSendWriteTarget
+	resolveMailSendWriteTarget = func() (*api.Client, bool, *remoteTarget, error) {
+		return client, true, nil, nil
+	}
+	t.Cleanup(func() { resolveMailSendWriteTarget = oldResolve })
+	t.Setenv("GC_MAIL", "fail")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSendWithIdempotencyJSON([]string{"worker"}, false, false, "alex/dalinar", "", "Status", "Build is green", "mail-cli-1", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr=%q", code, stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	if gotIdempotencyKey != "mail-cli-1" {
+		t.Fatalf("Idempotency-Key = %q, want mail-cli-1", gotIdempotencyKey)
+	}
+	if gotBody["from"] != "alex/dalinar" || gotBody["to"] != "worker" {
+		t.Fatalf("request body = %#v", gotBody)
+	}
+	if got := stdout.String(); got != "Sent message msg-remote to myrig/worker\n" {
+		t.Fatalf("stdout = %q", got)
+	}
+}
+
+func TestNewMailSendCmdRemoteIdempotencyFlagAndJSONShape(t *testing.T) {
+	var gotIdempotencyKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIdempotencyKey = r.Header.Get("Idempotency-Key")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"msg-json","from":"alex/dalinar","to":"myrig/worker","subject":"Status","body":"Build is green","created_at":"2026-07-17T00:00:00Z","read":false}`))
+	}))
+	defer srv.Close()
+	client := api.NewCityScopedClient(srv.URL, "remote-city")
+	oldResolve := resolveMailSendWriteTarget
+	resolveMailSendWriteTarget = func() (*api.Client, bool, *remoteTarget, error) {
+		return client, true, nil, nil
+	}
+	t.Cleanup(func() { resolveMailSendWriteTarget = oldResolve })
+
+	var stdout, stderr bytes.Buffer
+	cmd := newMailSendCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"myrig/worker", "--from", "alex/dalinar", "--subject", "Status", "--message", "Build is green", "--idempotency-key", "mail-json-1", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v; stderr=%q", err, stderr.String())
+	}
+	if gotIdempotencyKey != "mail-json-1" {
+		t.Fatalf("Idempotency-Key = %q, want mail-json-1", gotIdempotencyKey)
+	}
+	var got mailActionResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v; %q", err, stdout.String())
+	}
+	if !got.OK || got.Command != "mail.send" || got.ID != "msg-json" || got.Count == nil || *got.Count != 1 || got.Notified {
+		t.Fatalf("result = %+v", got)
+	}
+}
+
+func TestCmdMailSendRemotePositionalBodySuppliesRequiredSubject(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"msg-positional","from":"alex/dalinar","to":"myrig/worker","subject":"hello","body":"hello","created_at":"2026-07-17T00:00:00Z","read":false}`))
+	}))
+	defer srv.Close()
+	client := api.NewCityScopedClient(srv.URL, "remote-city")
+	oldResolve := resolveMailSendWriteTarget
+	resolveMailSendWriteTarget = func() (*api.Client, bool, *remoteTarget, error) { return client, true, nil, nil }
+	t.Cleanup(func() { resolveMailSendWriteTarget = oldResolve })
+
+	var stderr bytes.Buffer
+	if code := cmdMailSendWithIdempotencyJSON([]string{"worker", "hello"}, false, false, "alex/dalinar", "", "", "", "", false, &bytes.Buffer{}, &stderr); code != 0 {
+		t.Fatalf("code = %d, stderr=%q", code, stderr.String())
+	}
+	if gotBody["subject"] != "hello" || gotBody["body"] != "hello" {
+		t.Fatalf("request body = %#v, want positional body promoted to required subject", gotBody)
+	}
+}
+
+func TestCmdMailSendStorelessExecProviderOutsideCityStillWorks(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_CITY_CONTEXT", "")
+	t.Setenv("GC_CITY_URL", "")
+	t.Setenv("GC_MAIL", "exec:"+writeExecSendScript(t))
+	t.Chdir(t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human", "hello"}, false, false, "human", "", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); got != "Sent message exec-send-1 to human\n" {
+		t.Fatalf("stdout = %q", got)
+	}
+}
+
+func writeExecSendScript(t *testing.T) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "mail-send-exec")
+	data := `#!/bin/sh
+case "$1" in
+  ensure-running)
+    exit 0
+    ;;
+  send)
+    cat >/dev/null
+    printf '%s\n' '{"id":"exec-send-1","from":"human","to":"human","subject":"","body":"hello","created_at":"2026-07-17T00:00:00Z","read":false}'
+    exit 0
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(data), 0o755); err != nil {
+		t.Fatalf("WriteFile(exec script): %v", err)
+	}
+	return script
+}
+
+func TestCmdMailSendStorelessExecProviderWithExplicitNonCityPathStillWorks(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_CITY_CONTEXT", "")
+	t.Setenv("GC_CITY_URL", "")
+	t.Setenv("GC_MAIL", "exec:"+writeExecSendScript(t))
+	oldCityFlag := cityFlag
+	cityFlag = t.TempDir()
+	t.Cleanup(func() { cityFlag = oldCityFlag })
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human", "hello"}, false, false, "human", "", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestCmdMailSendRemoteErrorDoesNotFallBackLocally(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"title":"Not Found","status":404,"detail":"mail_recipient_not_found: missing recipient"}`))
+	}))
+	defer srv.Close()
+	client := api.NewCityScopedClient(srv.URL, "remote-city")
+	oldResolve := resolveMailSendWriteTarget
+	resolveMailSendWriteTarget = func() (*api.Client, bool, *remoteTarget, error) {
+		return client, true, nil, nil
+	}
+	t.Cleanup(func() { resolveMailSendWriteTarget = oldResolve })
+	t.Setenv("GC_MAIL", "fail")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSendWithIdempotencyJSON([]string{"missing", "hello"}, false, false, "alex/dalinar", "", "", "", "", false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "mail_recipient_not_found: missing recipient") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestCmdMailSendRemoteRejectsUnsupportedModesAndUnqualifiedSender(t *testing.T) {
+	client := api.NewCityScopedClient("http://127.0.0.1:1", "remote-city")
+	oldResolve := resolveMailSendWriteTarget
+	resolveMailSendWriteTarget = func() (*api.Client, bool, *remoteTarget, error) {
+		return client, true, nil, nil
+	}
+	t.Cleanup(func() { resolveMailSendWriteTarget = oldResolve })
+
+	tests := []struct {
+		name   string
+		notify bool
+		all    bool
+		from   string
+		want   string
+	}{
+		{name: "notify", notify: true, from: "alex/dalinar", want: "--notify is not supported for remote mail send"},
+		{name: "all", all: true, from: "alex/dalinar", want: "--all is not supported for remote mail send"},
+		{name: "missing from", from: "", want: "remote mail send requires --from"},
+		{name: "whitespace from", from: " alex/dalinar ", want: "town-qualified"},
+		{name: "unqualified from", from: "dalinar", want: "town-qualified"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := cmdMailSendWithIdempotencyJSON([]string{"myrig/worker", "hello"}, tt.notify, tt.all, tt.from, "", "", "", "", false, &bytes.Buffer{}, &stderr)
+			if code != 1 || !strings.Contains(stderr.String(), tt.want) {
+				t.Fatalf("code=%d stderr=%q, want %q", code, stderr.String(), tt.want)
+			}
+		})
+	}
+}
+
 func TestDefaultMailIdentityPrefersSessionIDOverGCAgentFallback(t *testing.T) {
 	t.Setenv("GC_ALIAS", "")
 	t.Setenv("GC_AGENT", "mayor")

@@ -3,7 +3,7 @@
 // This file is a thin adapter over the generated client in
 // internal/api/genclient. The adapter preserves the small surface that
 // CLI commands depend on (Client, NewClient, NewCityScopedClient, the
-// 14 mutation/lookup methods, ShouldFallback, IsConnError) while pushing
+// 15 mutation/lookup methods, ShouldFallback, IsConnError) while pushing
 // all wire-level work (request construction, JSON serialization, URL
 // escaping, Problem Details parsing) into the generated client.
 //
@@ -1092,15 +1092,62 @@ func (c *Client) GetStatus() (CachedRead[StatusView], error) {
 	}, nil
 }
 
+// SendMail sends one message through the existing per-city mail endpoint.
+// idempotencyKey is optional; when set, same-process replays return the first
+// created message without persisting a duplicate.
+func (c *Client) SendMail(from, to, subject, body, idempotencyKey string) (mail.Message, error) {
+	if err := c.requireCityScope(); err != nil {
+		return mail.Message{}, err
+	}
+	params := &genclient.SendMailParams{XGCRequest: "true"}
+	if idempotencyKey != "" {
+		params.IdempotencyKey = &idempotencyKey
+	}
+	request := genclient.SendMailJSONRequestBody{
+		From:    &from,
+		To:      to,
+		Subject: subject,
+		Body:    &body,
+	}
+	resp, err := c.cw.SendMailWithResponse(context.Background(), c.cityName, params, request)
+	if mutationErr := checkMutation(resp, err); mutationErr != nil {
+		return mail.Message{}, mutationErr
+	}
+	if resp.JSON201 == nil {
+		return mail.Message{}, fmt.Errorf("API returned %d without a mail message", resp.StatusCode())
+	}
+	wire := resp.JSON201
+	result := mail.Message{
+		ID:        wire.Id,
+		From:      wire.From,
+		To:        wire.To,
+		Subject:   wire.Subject,
+		Body:      wire.Body,
+		CreatedAt: wire.CreatedAt,
+		Read:      wire.Read,
+	}
+	if wire.ThreadId != nil {
+		result.ThreadID = *wire.ThreadId
+	}
+	if wire.ReplyTo != nil {
+		result.ReplyTo = *wire.ReplyTo
+	}
+	if wire.Priority != nil {
+		result.Priority = int(*wire.Priority)
+	}
+	if wire.Cc != nil {
+		result.CC = append([]string(nil), (*wire.Cc)...)
+	}
+	if wire.Rig != nil {
+		result.Rig = *wire.Rig
+	}
+	return result, nil
+}
+
 // ListMailInbox fetches unread messages for the given agent recipient via
 // GET /v0/city/{cityName}/mail. An empty agent lets the server choose the
-// default caller identity (same resolution path the CLI would take locally).
-// rig narrows the query to a single rig's provider when set. The returned
-// MailListView preserves partial aggregate-read metadata so callers do not
-// silently treat a degraded all-rig read as authoritative. The
-// CachedRead.AgeSeconds field carries the supervisor CachingStore age so
-// callers can surface _cache_age_s on --json output and a staleness banner
-// on human output.
+// default caller identity. rig narrows the query to one provider. The result
+// preserves partial-read metadata and the supervisor cache age.
 func (c *Client) ListMailInbox(agent, rig string) (CachedRead[MailListView], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[MailListView]{}, err
