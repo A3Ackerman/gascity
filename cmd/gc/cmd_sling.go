@@ -64,6 +64,7 @@ func newSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 	var merge string
 	var noConvoy bool
 	var owned bool
+	var convoyTarget string
 	var reassign bool
 	var onFormula string
 	var dryRun bool
@@ -132,9 +133,9 @@ Examples:
 			}
 			code := 0
 			if jsonOutput {
-				code = cmdSlingWithJSON(args, formula, nudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, true, stdout, stderr)
+				code = cmdSlingWithJSON(args, formula, nudge, force, title, vars, merge, noConvoy, owned, convoyTarget, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, true, stdout, stderr)
 			} else {
-				code = cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, stdout, stderr)
+				code = cmdSlingWithConvoyTarget(args, formula, nudge, force, title, vars, merge, noConvoy, owned, convoyTarget, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, stdout, stderr)
 			}
 			return exitForCode(code)
 		},
@@ -147,6 +148,7 @@ Examples:
 	cmd.Flags().StringVar(&merge, "merge", "", "merge strategy: direct, mr, or local")
 	cmd.Flags().BoolVar(&noConvoy, "no-convoy", false, "skip auto-convoy creation")
 	cmd.Flags().BoolVar(&owned, "owned", false, "mark auto-convoy as owned (skip auto-close)")
+	cmd.Flags().StringVar(&convoyTarget, "target", "", "target branch for an auto-created convoy")
 	cmd.Flags().BoolVar(&reassign, "reassign", false, "clear any existing human assignee before routing (for human→pool handoff)")
 	cmd.Flags().StringVar(&onFormula, "on", "", "attach wisp from formula to bead before routing")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "show what would be done without executing")
@@ -198,12 +200,17 @@ func shellSlingRunner(dir, command string, env map[string]string) (string, error
 	return string(out), nil
 }
 
-// cmdSling is the CLI entry point for gc sling.
+//nolint:unparam // isFormula is retained for the testable legacy command seam.
 func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int {
-	return cmdSlingWithJSON(args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, false, stdout, stderr)
+	return cmdSlingWithConvoyTarget(args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, "", reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, stdout, stderr)
 }
 
-func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput bool, stdout, stderr io.Writer) int {
+func cmdSlingWithConvoyTarget(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned bool, convoyTarget string, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int {
+	return cmdSlingWithJSON(args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, convoyTarget, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, false, stdout, stderr)
+}
+
+//nolint:unparam // isFormula remains part of the stable test command seam.
+func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned bool, convoyTarget string, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput bool, stdout, stderr io.Writer) int {
 	humanStdout := stdout
 	if jsonOutput {
 		humanStdout = io.Discard
@@ -229,7 +236,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		return fail("city_resolve_failed", fmt.Sprintf("gc sling: %v", rerr))
 	}
 	if isRemote {
-		return cmdSlingRemote(remoteC, remoteTgt, args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, jsonOutput, stdout, stderr)
+		return cmdSlingRemoteWithConvoyTarget(remoteC, remoteTgt, args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, convoyTarget, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, jsonOutput, stdout, stderr)
 	}
 	// --stdin: read bead text from stdin early (before city resolution)
 	// so errors are reported immediately. First line = title, rest = description.
@@ -331,6 +338,11 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		fmt.Fprintln(stderr, agentNotFoundMsg("gc sling", target, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if !isFormula && !noConvoy {
+		if err := validateConvoyTargetPolicy(cfg.Convoys, owned, convoyTarget, convoyDefaultBranchForSling(cfg, cityPath, beadOrFormula, a)); err != nil {
+			return fail("convoy_target_policy", fmt.Sprintf("gc sling: %v", err))
+		}
+	}
 
 	sp, err := newSessionProvider()
 	if err != nil {
@@ -394,6 +406,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		Title:         title,
 		Vars:          vars,
 		Merge:         merge,
+		ConvoyTarget:  convoyTarget,
 		NoConvoy:      noConvoy,
 		Owned:         owned,
 		Reassign:      reassign,
@@ -888,15 +901,16 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		result, err = sling.DoSlingBatch(opts, deps, querier)
 	} else {
 		result, err = sl.ExpandConvoy(context.Background(), opts.BeadOrFormula, opts.Target, sling.RouteOpts{
-			Merge:      opts.Merge,
-			NoConvoy:   opts.NoConvoy,
-			Owned:      opts.Owned,
-			Nudge:      opts.Nudge,
-			Force:      opts.Force,
-			SkipPoke:   opts.SkipPoke,
-			DryRun:     opts.DryRun,
-			InlineText: opts.InlineText,
-			NoFormula:  opts.NoFormula,
+			Merge:        opts.Merge,
+			ConvoyTarget: opts.ConvoyTarget,
+			NoConvoy:     opts.NoConvoy,
+			Owned:        opts.Owned,
+			Nudge:        opts.Nudge,
+			Force:        opts.Force,
+			SkipPoke:     opts.SkipPoke,
+			DryRun:       opts.DryRun,
+			InlineText:   opts.InlineText,
+			NoFormula:    opts.NoFormula,
 		}, querier)
 	}
 	// Print warnings before error check so they're visible on failure.

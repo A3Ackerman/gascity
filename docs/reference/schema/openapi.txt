@@ -7800,6 +7800,10 @@
             "description": "Bead ID to sling.",
             "type": "string"
           },
+          "convoy_target": {
+            "description": "Target branch persisted on an auto-created convoy.",
+            "type": "string"
+          },
           "force": {
             "description": "Bypass cross-rig guards; for direct bead routes, also bypass missing-bead validation. Formula-backed graph routes may replace existing live workflow roots but still require the source bead to exist.",
             "type": "boolean"
@@ -7807,6 +7811,10 @@
           "formula": {
             "description": "Formula name for workflow launch.",
             "type": "string"
+          },
+          "owned": {
+            "description": "Mark the auto-created convoy as owned.",
+            "type": "boolean"
           },
           "rig": {
             "description": "Rig name.",

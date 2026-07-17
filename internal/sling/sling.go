@@ -51,10 +51,12 @@ type SlingOpts struct {
 	Vars          []string
 	Merge         string // "", "direct", "mr", "local"
 	NoConvoy      bool
-	Owned         bool
-	Nudge         bool
-	Force         bool
-	DryRun        bool
+	// ConvoyTarget is the branch target persisted on an auto-created convoy.
+	ConvoyTarget string
+	Owned        bool
+	Nudge        bool
+	Force        bool
+	DryRun       bool
 	// Reassign clears any existing human assignee on the bead before
 	// routing so the target pool/agent can claim it. Without this, a
 	// bead claimed by a human (`bd update --claim`) stays invisible
@@ -232,12 +234,13 @@ func New(deps SlingDeps) (*Sling, error) {
 
 // RouteOpts holds options for plain bead routing.
 type RouteOpts struct {
-	Merge    string // "", "direct", "mr", "local"
-	NoConvoy bool
-	Owned    bool
-	Nudge    bool
-	Force    bool
-	DryRun   bool
+	Merge        string // "", "direct", "mr", "local"
+	ConvoyTarget string
+	NoConvoy     bool
+	Owned        bool
+	Nudge        bool
+	Force        bool
+	DryRun       bool
 	// InlineText is set only by the CLI path for ad-hoc task text. API
 	// callers always provide explicit bead or formula references.
 	InlineText bool
@@ -250,15 +253,17 @@ type RouteOpts struct {
 
 // FormulaOpts holds options for formula-based operations.
 type FormulaOpts struct {
-	Title     string
-	Vars      []string
-	Merge     string
-	Nudge     bool
-	Force     bool
-	DryRun    bool
-	SkipPoke  bool
-	ScopeKind string
-	ScopeRef  string
+	Title        string
+	Vars         []string
+	Merge        string
+	Nudge        bool
+	Force        bool
+	DryRun       bool
+	SkipPoke     bool
+	Owned        bool
+	ConvoyTarget string
+	ScopeKind    string
+	ScopeRef     string
 }
 
 // RouteBead routes a plain bead to an agent.
@@ -273,6 +278,7 @@ func (s *Sling) RouteBead(_ context.Context, beadID string, target config.Agent,
 		Force:         opts.Force,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
+		ConvoyTarget:  opts.ConvoyTarget,
 		InlineText:    opts.InlineText,
 	}, s.deps, s.deps.Store)
 }
@@ -290,6 +296,8 @@ func (s *Sling) LaunchFormula(_ context.Context, formulaName string, target conf
 		Force:         opts.Force,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
+		Owned:         opts.Owned,
+		ConvoyTarget:  opts.ConvoyTarget,
 		ScopeKind:     opts.ScopeKind,
 		ScopeRef:      opts.ScopeRef,
 	}, s.deps, s.deps.Store)
@@ -307,6 +315,8 @@ func (s *Sling) AttachFormula(_ context.Context, formulaName, beadID string, tar
 		Nudge:         opts.Nudge,
 		Force:         opts.Force,
 		SkipPoke:      opts.SkipPoke,
+		Owned:         opts.Owned,
+		ConvoyTarget:  opts.ConvoyTarget,
 		DryRun:        opts.DryRun,
 		ScopeKind:     opts.ScopeKind,
 		ScopeRef:      opts.ScopeRef,
@@ -323,6 +333,7 @@ func (s *Sling) ExpandConvoy(_ context.Context, convoyID string, target config.A
 		Owned:         opts.Owned,
 		Nudge:         opts.Nudge,
 		Force:         opts.Force,
+		ConvoyTarget:  opts.ConvoyTarget,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
 		InlineText:    opts.InlineText,

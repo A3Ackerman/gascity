@@ -103,6 +103,12 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 			return result, err
 		}
 	}
+	if opts.Owned && !opts.NoConvoy && !opts.IsFormula {
+		defaultBranch := convoyDefaultBranch(deps, opts.BeadOrFormula, a)
+		if err := convoycore.ValidateTargetPolicy(deps.Cfg.Convoys, true, opts.ConvoyTarget, defaultBranch); err != nil {
+			return result, err
+		}
+	}
 	if shouldGuardCrossRig(opts) {
 		if err := CrossRigRouteError(opts.BeadOrFormula, a, deps.Cfg); err != nil {
 			return result, err
@@ -575,25 +581,28 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			if opts.Owned {
 				convoyLabels = []string{"owned"}
 			}
-			convoy, err := deps.Store.Create(beads.Bead{
+			fields := convoycore.ConvoyFields{Target: opts.ConvoyTarget}
+			convoy := beads.Bead{
 				Title:  fmt.Sprintf("sling-%s", beadID),
 				Type:   "convoy",
 				Labels: convoyLabels,
-			})
+			}
+			convoycore.ApplyConvoyFields(&convoy, fields)
+			created, err := deps.Store.Create(convoy)
 			if err != nil {
 				result.MetadataErrors = append(result.MetadataErrors,
 					fmt.Sprintf("creating auto-convoy: %v", err))
 			} else {
-				// Use a "tracks" dep (convoy → bead) instead of parent-child
-				// so the bead's existing parent (e.g. its epic) is preserved.
-				// bd update --parent evicts any prior parent-child edge; the
-				// tracks dep is additive and does not disturb the epic
-				// rollup.
-				if err := convoycore.TrackItem(deps.Store, convoy.ID, beadID); err != nil {
+				if opts.ConvoyTarget != "" {
+					if metadataErr := convoycore.SetConvoyFields(deps.Store, created.ID, fields); metadataErr != nil {
+						result.MetadataErrors = append(result.MetadataErrors, fmt.Sprintf("setting auto-convoy target: %v", metadataErr))
+					}
+				}
+				if err := convoycore.TrackItem(deps.Store, created.ID, beadID); err != nil {
 					result.MetadataErrors = append(result.MetadataErrors,
 						fmt.Sprintf("linking bead to convoy: %v", err))
 				} else {
-					result.ConvoyID = convoy.ID
+					result.ConvoyID = created.ID
 				}
 			}
 		}
@@ -1201,6 +1210,15 @@ func listContainerChildren(querier BeadChildQuerier, containerID string, include
 // DoSlingBatch handles convoy expansion before delegating to DoSling.
 func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (SlingResult, error) {
 	a := opts.Target
+	if opts.Owned && !opts.NoConvoy && !opts.IsFormula {
+		var policy config.ConvoyPolicyConfig
+		if deps.Cfg != nil {
+			policy = deps.Cfg.Convoys
+		}
+		if err := convoycore.ValidateTargetPolicy(policy, true, opts.ConvoyTarget, convoyDefaultBranch(deps, opts.BeadOrFormula, a)); err != nil {
+			return SlingResult{Target: a.QualifiedName()}, err
+		}
+	}
 
 	// Formula mode, nil querier → delegate directly.
 	if opts.IsFormula || querier == nil {
@@ -1568,4 +1586,30 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) er
 		return nil
 	}
 	return store.Update(beadID, update)
+}
+
+func convoyDefaultBranch(deps SlingDeps, beadID string, agent config.Agent) string {
+	if deps.Cfg == nil {
+		return ""
+	}
+	if rig, ok := FindRigByPrefix(deps.Cfg, BeadPrefixForCity(deps.Cfg, beadID)); ok {
+		if branch := rig.EffectiveDefaultBranch(); branch != "" {
+			return branch
+		}
+		if deps.Branches != nil && strings.TrimSpace(rig.Path) != "" {
+			return strings.TrimSpace(deps.Branches.DefaultBranch(rig.Path))
+		}
+	}
+	for _, rig := range deps.Cfg.Rigs {
+		if rig.Name != strings.TrimSpace(agent.Dir) {
+			continue
+		}
+		if branch := rig.EffectiveDefaultBranch(); branch != "" {
+			return branch
+		}
+		if deps.Branches != nil && strings.TrimSpace(rig.Path) != "" {
+			return strings.TrimSpace(deps.Branches.DefaultBranch(rig.Path))
+		}
+	}
+	return ""
 }

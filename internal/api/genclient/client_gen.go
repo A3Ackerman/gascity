@@ -3493,11 +3493,17 @@ type SlingInputBody struct {
 	// Bead Bead ID to sling.
 	Bead *string `json:"bead,omitempty"`
 
+	// ConvoyTarget Target branch persisted on an auto-created convoy.
+	ConvoyTarget *string `json:"convoy_target,omitempty"`
+
 	// Force Bypass cross-rig guards; for direct bead routes, also bypass missing-bead validation. Formula-backed graph routes may replace existing live workflow roots but still require the source bead to exist.
 	Force *bool `json:"force,omitempty"`
 
 	// Formula Formula name for workflow launch.
 	Formula *string `json:"formula,omitempty"`
+
+	// Owned Mark the auto-created convoy as owned.
+	Owned *bool `json:"owned,omitempty"`
 
 	// Rig Rig name.
 	Rig *string `json:"rig,omitempty"`

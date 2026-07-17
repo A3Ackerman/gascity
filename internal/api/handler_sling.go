@@ -31,6 +31,8 @@ type slingBody struct {
 	Title          string            `json:"title"`
 	Vars           map[string]string `json:"vars"`
 	ScopeKind      string            `json:"scope_kind"`
+	Owned          bool              `json:"owned"`
+	ConvoyTarget   string            `json:"convoy_target"`
 	ScopeRef       string            `json:"scope_ref"`
 	Force          bool              `json:"force"`
 }
@@ -122,11 +124,13 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	}
 
 	formulaOpts := sling.FormulaOpts{
-		Title:     strings.TrimSpace(body.Title),
-		Vars:      varSlice,
-		ScopeKind: body.ScopeKind,
-		ScopeRef:  body.ScopeRef,
-		Force:     body.Force,
+		Title:        strings.TrimSpace(body.Title),
+		Vars:         varSlice,
+		ScopeKind:    body.ScopeKind,
+		ScopeRef:     body.ScopeRef,
+		Force:        body.Force,
+		Owned:        body.Owned,
+		ConvoyTarget: body.ConvoyTarget,
 	}
 
 	// Dispatch to the right intent-based method.
@@ -153,10 +157,10 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		attachedBeadID = strings.TrimSpace(body.Bead)
 		formulaName = agentCfg.EffectiveDefaultSlingFormula()
 		// Default formula: route the bead and let the domain apply the default.
-		result, err = sl.RouteBead(ctx, attachedBeadID, agentCfg, sling.RouteOpts{Force: body.Force})
+		result, err = sl.RouteBead(ctx, attachedBeadID, agentCfg, sling.RouteOpts{Force: body.Force, Owned: body.Owned, ConvoyTarget: body.ConvoyTarget})
 
 	default:
-		result, err = sl.RouteBead(ctx, body.Bead, agentCfg, sling.RouteOpts{Force: body.Force})
+		result, err = sl.RouteBead(ctx, body.Bead, agentCfg, sling.RouteOpts{Force: body.Force, Owned: body.Owned, ConvoyTarget: body.ConvoyTarget})
 	}
 
 	if err != nil {
@@ -391,18 +395,11 @@ func (r apiBranchResolver) DefaultBranch(dir string) string {
 	if dir == "" {
 		dir = r.cityPath
 	}
-	// Best-effort: read git's origin/HEAD ref for the default branch.
-	// Falls back to empty string if git is unavailable.
-	cmd := exec.CommandContext(context.Background(), "git", "-C", dir,
-		"symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-	// Sanitize the environment so a leaked GIT_DIR from a parent repo or hook
-	// cannot redirect resolution to the wrong repository's default branch.
-	cmd.Env = gitpkg.SanitizedEnv()
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
+	branch, err := gitpkg.New(dir).DefaultBranch()
+	if err != nil || strings.TrimSpace(branch) == "" {
+		return "main"
 	}
-	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "origin/"))
+	return strings.TrimSpace(branch)
 }
 
 // apiNotifier implements sling.Notifier for the API context.

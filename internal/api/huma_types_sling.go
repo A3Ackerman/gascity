@@ -23,6 +23,8 @@ type SlingInput struct {
 		Vars           map[string]string `json:"vars,omitempty" doc:"Formula variables."`
 		ScopeKind      string            `json:"scope_kind,omitempty" doc:"Scope kind (city or rig)."`
 		ScopeRef       string            `json:"scope_ref,omitempty" doc:"Scope reference."`
+		Owned          bool              `json:"owned,omitempty" doc:"Mark the auto-created convoy as owned."`
+		ConvoyTarget   string            `json:"convoy_target,omitempty" doc:"Target branch persisted on an auto-created convoy."`
 		Force          bool              `json:"force,omitempty" doc:"Bypass cross-rig guards; for direct bead routes, also bypass missing-bead validation. Formula-backed graph routes may replace existing live workflow roots but still require the source bead to exist."`
 	}
 }

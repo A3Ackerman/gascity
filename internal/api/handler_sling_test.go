@@ -1077,3 +1077,9 @@ func TestApiVsAgentutilResolverParity(t *testing.T) {
 		})
 	}
 }
+
+func TestAPIBranchResolverFallsBackToMain(t *testing.T) {
+	if got := (apiBranchResolver{cityPath: t.TempDir()}).DefaultBranch(""); got != "main" {
+		t.Fatalf("DefaultBranch() = %q, want main fallback", got)
+	}
+}

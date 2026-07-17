@@ -104,7 +104,7 @@ func TestClientSling_FormulaAndVars(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Sling(SlingRequest{Target: "mayor", Formula: "review", Vars: map[string]string{"pr": "42"}}); err != nil {
+	if _, err := c.Sling(SlingRequest{Target: "mayor", Formula: "review", Vars: map[string]string{"pr": "42"}, Owned: true, ConvoyTarget: "feature/work"}); err != nil {
 		t.Fatal(err)
 	}
 	if gotBody["formula"] != "review" {
@@ -113,5 +113,8 @@ func TestClientSling_FormulaAndVars(t *testing.T) {
 	vars, _ := gotBody["vars"].(map[string]any)
 	if vars["pr"] != "42" {
 		t.Errorf("vars not sent: %v", gotBody["vars"])
+	}
+	if gotBody["owned"] != true || gotBody["convoy_target"] != "feature/work" {
+		t.Errorf("policy fields not sent: owned=%v convoy_target=%v", gotBody["owned"], gotBody["convoy_target"])
 	}
 }

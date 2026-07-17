@@ -361,6 +361,9 @@ func defaultBranchFor(dir string) string {
 	}
 	g := git.New(dir)
 	branch, _ := g.DefaultBranch()
+	if strings.TrimSpace(branch) == "" {
+		return "main"
+	}
 	return branch
 }
 

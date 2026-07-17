@@ -1397,6 +1397,8 @@ type SlingRequest struct {
 	Vars           map[string]string
 	ScopeKind      string
 	ScopeRef       string
+	Owned          bool
+	ConvoyTarget   string
 	Force          bool
 }
 
@@ -1430,6 +1432,11 @@ func (c *Client) Sling(req SlingRequest) (SlingResult, error) {
 	setStrPtr(&body.Title, req.Title)
 	setStrPtr(&body.ScopeKind, req.ScopeKind)
 	setStrPtr(&body.ScopeRef, req.ScopeRef)
+	setStrPtr(&body.ConvoyTarget, req.ConvoyTarget)
+	if req.Owned {
+		o := true
+		body.Owned = &o
+	}
 	if req.Force {
 		f := true
 		body.Force = &f

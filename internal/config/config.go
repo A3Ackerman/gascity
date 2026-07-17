@@ -254,6 +254,8 @@ type City struct {
 	Patches Patches `toml:"patches,omitempty"`
 	// Beads configures the bead store backend.
 	Beads BeadsConfig `toml:"beads,omitempty"`
+	// Convoys configures owned convoy target policy.
+	Convoys ConvoyPolicyConfig `toml:"convoys,omitempty"`
 	// Session configures the session provider backend.
 	Session SessionConfig `toml:"session,omitempty"`
 	// Mail configures the mail provider backend.
@@ -441,6 +443,14 @@ type City struct {
 	// CityPricing preserves the city-level pricing layer before Pricing is
 	// flattened for legacy callers. Runtime-only.
 	CityPricing []pricing.ModelPricing `toml:"-" json:"-"`
+}
+
+// ConvoyPolicyConfig controls target requirements for owned convoy lifecycles.
+type ConvoyPolicyConfig struct {
+	// RequireOwnedTarget requires owned convoys to carry an explicit target.
+	RequireOwnedTarget bool `toml:"require_owned_target,omitempty"`
+	// ForbidDefaultTarget rejects owned convoy targets equal to the owning rig's default branch.
+	ForbidDefaultTarget bool `toml:"forbid_default_target,omitempty"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent

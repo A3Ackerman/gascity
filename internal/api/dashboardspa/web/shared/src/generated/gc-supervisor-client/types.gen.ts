@@ -3386,6 +3386,10 @@ export type SlingInputBody = {
      */
     bead?: string;
     /**
+     * Target branch persisted on an auto-created convoy.
+     */
+    convoy_target?: string;
+    /**
      * Bypass cross-rig guards; for direct bead routes, also bypass missing-bead validation. Formula-backed graph routes may replace existing live workflow roots but still require the source bead to exist.
      */
     force?: boolean;
@@ -3393,6 +3397,10 @@ export type SlingInputBody = {
      * Formula name for workflow launch.
      */
     formula?: string;
+    /**
+     * Mark the auto-created convoy as owned.
+     */
+    owned?: boolean;
     /**
      * Rig name.
      */

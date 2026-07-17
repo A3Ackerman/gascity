@@ -4169,6 +4169,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `--scope-kind` | string |  | logical workflow scope kind for formulas v2 launches |
 | `--scope-ref` | string |  | logical workflow scope ref for formulas v2 launches |
 | `--stdin` | bool |  | read bead text from stdin (first line = title, rest = description) |
+| `--target` | string |  | target branch for an auto-created convoy |
 | `-t`, `--title` | string |  | wisp root bead title (with --formula or --on) |
 | `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |
 

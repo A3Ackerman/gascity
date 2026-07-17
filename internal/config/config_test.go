@@ -81,6 +81,46 @@ func TestMarshalRoundTrip(t *testing.T) {
 	}
 }
 
+func TestParseConvoyPolicyConfig(t *testing.T) {
+	cfg, err := Parse([]byte(`[workspace]
+name = "policy-city"
+
+[convoys]
+require_owned_target = true
+forbid_default_target = true
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Convoys.RequireOwnedTarget {
+		t.Fatal("Convoys.RequireOwnedTarget = false, want true")
+	}
+	if !cfg.Convoys.ForbidDefaultTarget {
+		t.Fatal("Convoys.ForbidDefaultTarget = false, want true")
+	}
+}
+
+func TestMarshalConvoyPolicyConfig(t *testing.T) {
+	cfg := City{Workspace: Workspace{Name: "policy-city"}, Convoys: ConvoyPolicyConfig{
+		RequireOwnedTarget:  true,
+		ForbidDefaultTarget: true,
+	}}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), "[convoys]") || !strings.Contains(string(data), "require_owned_target = true") || !strings.Contains(string(data), "forbid_default_target = true") {
+		t.Fatalf("Marshal output missing convoy policy fields:\n%s", data)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(Marshal output): %v", err)
+	}
+	if !reflect.DeepEqual(got.Convoys, cfg.Convoys) {
+		t.Fatalf("round-tripped Convoys = %#v, want %#v", got.Convoys, cfg.Convoys)
+	}
+}
+
 func TestMarshalOmitsEmptyFields(t *testing.T) {
 	c := DefaultCity("test")
 	data, err := c.Marshal()

@@ -29,6 +29,8 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		Title:          input.Body.Title,
 		Vars:           input.Body.Vars,
 		ScopeKind:      input.Body.ScopeKind,
+		Owned:          input.Body.Owned,
+		ConvoyTarget:   input.Body.ConvoyTarget,
 		ScopeRef:       input.Body.ScopeRef,
 		Force:          input.Body.Force,
 	}

@@ -1140,6 +1140,10 @@
           "$ref": "#/$defs/BeadsConfig",
           "description": "Beads configures the bead store backend."
         },
+        "convoys": {
+          "$ref": "#/$defs/ConvoyPolicyConfig",
+          "description": "Convoys configures owned convoy target policy."
+        },
         "session": {
           "$ref": "#/$defs/SessionConfig",
           "description": "Session configures the session provider backend."
@@ -1257,6 +1261,21 @@
       "additionalProperties": false,
       "type": "object",
       "description": "ConvergenceConfig holds convergence loop limits."
+    },
+    "ConvoyPolicyConfig": {
+      "properties": {
+        "require_owned_target": {
+          "type": "boolean",
+          "description": "RequireOwnedTarget requires owned convoys to carry an explicit target."
+        },
+        "forbid_default_target": {
+          "type": "boolean",
+          "description": "ForbidDefaultTarget rejects owned convoy targets equal to the owning rig's default branch."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ConvoyPolicyConfig controls target requirements for owned convoy lifecycles."
     },
     "DaemonConfig": {
       "properties": {

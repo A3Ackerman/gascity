@@ -1718,8 +1718,10 @@ export const zSessionUnknownStatePayload = z.object({
 export const zSlingInputBody = z.object({
     attached_bead_id: z.string().optional(),
     bead: z.string().optional(),
+    convoy_target: z.string().optional(),
     force: z.boolean().optional(),
     formula: z.string().optional(),
+    owned: z.boolean().optional(),
     rig: z.string().optional(),
     scope_kind: z.string().optional(),
     scope_ref: z.string().optional(),

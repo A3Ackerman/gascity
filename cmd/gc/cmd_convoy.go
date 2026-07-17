@@ -161,6 +161,10 @@ func cmdConvoyCreateWithOptionsJSON(args []string, opts convoyCreateOptions, jso
 		}
 	}
 
+	if err := validateConvoyTargetPolicy(cfg.Convoys, opts.Owned, opts.Fields.Target, convoyDefaultBranchForBead(cfg, cityPath, firstConvoyIssue(args))); err != nil {
+		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Determine which store to use: if children are provided, use the
 	// first child's rig store so convoy and children share a database.
 	// This avoids cross-store parent references that bd can't resolve.
@@ -221,6 +225,12 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 	if err := validateConvoyCreateStoreScope(cfg, cityPath, issueIDs); err != nil {
 		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if cfg != nil {
+		if err := validateConvoyTargetPolicy(cfg.Convoys, opts.Owned, opts.Fields.Target, convoyDefaultBranchForBead(cfg, cityPath, firstConvoyIssue(args))); err != nil {
+			fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	b := beads.Bead{Title: name, Type: "convoy"}
@@ -1109,22 +1119,25 @@ func cmdConvoyTargetJSON(args []string, jsonOut bool, stdout, stderr io.Writer) 
 	if len(args) < 2 {
 		return doConvoyTargetJSON(nil, args, jsonOut, stdout, stderr)
 	}
-	convoyID := ""
-	if len(args) > 0 {
-		convoyID = args[0]
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy target: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	store, code := openConvoyStoreByID(convoyID, stderr, "gc convoy target")
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy target: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	emitLoadCityConfigWarnings(stderr, prov)
+	store, code := openConvoyStoreByIDAt(args[0], cityPath, stderr, "gc convoy target")
 	if store == nil {
 		return code
 	}
-	return doConvoyTargetJSON(store, args, jsonOut, stdout, stderr)
+	return doConvoyTargetJSONWithConfig(store, cfg, cityPath, args, jsonOut, stdout, stderr)
 }
 
-func doConvoyTarget(store beads.Store, args []string, stdout, stderr io.Writer) int {
-	return doConvoyTargetJSON(store, args, false, stdout, stderr)
-}
-
-func doConvoyTargetJSON(store beads.Store, args []string, jsonOut bool, stdout, stderr io.Writer) int {
+func doConvoyTargetJSONWithConfig(store beads.Store, cfg *config.City, cityPath string, args []string, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintln(stderr, "gc convoy target: missing convoy ID or branch") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1135,7 +1148,6 @@ func doConvoyTargetJSON(store beads.Store, args []string, jsonOut bool, stdout, 
 		fmt.Fprintln(stderr, "gc convoy target: target branch cannot be empty") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
 	convoy, err := store.Get(id)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy target: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1145,16 +1157,29 @@ func doConvoyTargetJSON(store beads.Store, args []string, jsonOut bool, stdout, 
 		fmt.Fprintf(stderr, "gc convoy target: bead %s is not a convoy\n", id) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if cfg != nil {
+		if err := validateConvoyTargetPolicy(cfg.Convoys, hasLabel(convoy.Labels, "owned"), target, convoyDefaultBranchForBead(cfg, cityPath, id)); err != nil {
+			fmt.Fprintf(stderr, "gc convoy target: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	if err := setConvoyFields(store, id, ConvoyFields{Target: target}); err != nil {
 		fmt.Fprintf(stderr, "gc convoy target: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
 	if jsonOut {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy target", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.target", Action: "target", ConvoyID: id, Target: target})
 	}
 	fmt.Fprintf(stdout, "Set target of convoy %s to %s\n", id, target) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func doConvoyTarget(store beads.Store, args []string, stdout, stderr io.Writer) int {
+	return doConvoyTargetJSON(store, args, false, stdout, stderr)
+}
+
+func doConvoyTargetJSON(store beads.Store, args []string, jsonOut bool, stdout, stderr io.Writer) int {
+	return doConvoyTargetJSONWithConfig(store, nil, "", args, jsonOut, stdout, stderr)
 }
 
 func newConvoyAddCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1663,16 +1688,23 @@ func cmdConvoyLandJSON(args []string, opts landOpts, jsonOut bool, stdout, stder
 	if len(args) < 1 {
 		return doConvoyLandJSON(nil, events.Discard, args, opts, jsonOut, stdout, stderr)
 	}
-	convoyID := ""
-	if len(args) > 0 {
-		convoyID = args[0]
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy land: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	store, code := openConvoyStoreByID(convoyID, stderr, "gc convoy land")
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy land: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	emitLoadCityConfigWarnings(stderr, prov)
+	store, code := openConvoyStoreByIDAt(args[0], cityPath, stderr, "gc convoy land")
 	if store == nil {
 		return code
 	}
-	rec := openCityRecorder(stderr)
-	return doConvoyLandJSON(store, rec, args, opts, jsonOut, stdout, stderr)
+	rec := openCityRecorderAt(cityPath, stderr)
+	return doConvoyLandJSONWithConfig(store, rec, cfg, cityPath, args, opts, jsonOut, stdout, stderr)
 }
 
 // doConvoyLand verifies an owned convoy's children are closed, optionally
@@ -1682,6 +1714,10 @@ func doConvoyLand(store beads.Store, rec events.Recorder, args []string, opts la
 }
 
 func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opts landOpts, jsonOut bool, stdout, stderr io.Writer) int {
+	return doConvoyLandJSONWithConfig(store, rec, nil, "", args, opts, jsonOut, stdout, stderr)
+}
+
+func doConvoyLandJSONWithConfig(store beads.Store, rec events.Recorder, cfg *config.City, cityPath string, args []string, opts landOpts, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc convoy land: missing convoy ID") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1701,7 +1737,6 @@ func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opt
 		fmt.Fprintf(stderr, "gc convoy land: convoy %s is not owned (missing 'owned' label)\n", convoyID) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
 	// Already closed → idempotent success.
 	if convoycore.IsTerminalStatus(convoy.Status) {
 		if jsonOut {
@@ -1709,6 +1744,13 @@ func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opt
 		}
 		fmt.Fprintf(stdout, "Convoy %s already closed\n", convoyID) //nolint:errcheck // best-effort stdout
 		return 0
+	}
+	if cfg != nil {
+		fields := getConvoyFields(convoy)
+		if err := validateConvoyTargetPolicy(cfg.Convoys, true, fields.Target, convoyDefaultBranchForBead(cfg, cityPath, convoyID)); err != nil {
+			fmt.Fprintf(stderr, "gc convoy land: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	// Check children.

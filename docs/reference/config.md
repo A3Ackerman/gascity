@@ -26,6 +26,7 @@ City is the top-level configuration for a Gas City instance.
 | `rigs` | []Rig |  |  | Rigs lists external projects registered in the city. |
 | `patches` | Patches |  |  | Patches holds targeted modifications applied after fragment merge. |
 | `beads` | BeadsConfig |  |  | Beads configures the bead store backend. |
+| `convoys` | ConvoyPolicyConfig |  |  | Convoys configures owned convoy target policy. |
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
 | `mail` | MailConfig |  |  | Mail configures the mail provider backend. |
 | `events` | EventsConfig |  |  | Events configures the events provider backend. |
@@ -305,6 +306,15 @@ ConvergenceConfig holds convergence loop limits.
 |-------|------|----------|---------|-------------|
 | `max_per_agent` | integer |  | `2` | MaxPerAgent is the maximum number of active convergence loops per agent in each bead store scope. City/HQ and each bound rig enforce the limit independently. 0 means use default (2). |
 | `max_total` | integer |  | `10` | MaxTotal is the maximum total number of active convergence loops. 0 means use default (10). |
+
+## ConvoyPolicyConfig
+
+ConvoyPolicyConfig controls target requirements for owned convoy lifecycles.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `require_owned_target` | boolean |  |  | RequireOwnedTarget requires owned convoys to carry an explicit target. |
+| `forbid_default_target` | boolean |  |  | ForbidDefaultTarget rejects owned convoy targets equal to the owning rig's default branch. |
 
 ## DaemonConfig
 

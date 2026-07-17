@@ -16,7 +16,13 @@ import (
 // refused with a clear message: inline text (needs a locally-created bead), the
 // 1-arg form (infers the target from local rig config), and the local
 // batch/dry-run flags the server API does not model.
+//
+//nolint:unparam // title is retained for the legacy remote command seam.
 func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput bool, stdout, stderr io.Writer) int {
+	return cmdSlingRemoteWithConvoyTarget(c, target, args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, "", reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, jsonOutput, stdout, stderr)
+}
+
+func cmdSlingRemoteWithConvoyTarget(c *api.Client, target *remoteTarget, args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned bool, convoyTarget string, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput bool, stdout, stderr io.Writer) int {
 	fail := func(code, message string) int {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, code, message, 1)
@@ -39,7 +45,6 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 		{doNudge, "--nudge"},
 		{merge != "", "--merge"},
 		{noConvoy, "--no-convoy"},
-		{owned, "--owned"},
 		{reassign, "--reassign"},
 		{onFormula != "", "--on"},
 		{noFormula, "--no-formula"},
@@ -65,18 +70,20 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 	if !isFormula && strings.ContainsAny(args[1], " \t\n") {
 		return fail("unsupported_remote", "gc sling: inline text is not supported for a remote city; sling an existing bead by ID")
 	}
-
 	vmap, err := parseSlingVars(vars)
 	if err != nil {
 		return fail("invalid_arguments", "gc sling: "+err.Error())
 	}
+
 	req := api.SlingRequest{
-		Target:    args[0],
-		Title:     title,
-		Vars:      vmap,
-		ScopeKind: scopeKind,
-		ScopeRef:  scopeRef,
-		Force:     force,
+		Target:       args[0],
+		Title:        title,
+		Vars:         vmap,
+		ScopeKind:    scopeKind,
+		ScopeRef:     scopeRef,
+		Force:        force,
+		Owned:        owned,
+		ConvoyTarget: convoyTarget,
 	}
 	if isFormula {
 		req.Formula = args[1]
