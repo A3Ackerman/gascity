@@ -8,6 +8,31 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+func TestBuildLaunchCommandUnsetsColorKillersForInteractiveProviders(t *testing.T) {
+	for _, tc := range []struct {
+		provider string
+		command  string
+		want     string
+	}{
+		{provider: "claude", command: "claude", want: "env -u CI -u NO_COLOR claude"},
+		{provider: "claude/tmux-cli", command: "claude", want: "env -u CI -u NO_COLOR claude"},
+		{provider: "codex", command: "codex", want: "env -u CI -u NO_COLOR codex"},
+		{provider: "omp", command: "omp", want: "omp"},
+		{provider: "custom", command: "custom-agent", want: "custom-agent"},
+		{provider: "custom-codex", command: "custom-codex", want: "custom-codex"},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			got, _, err := buildLaunchCommand("worker", runtime.Config{Command: tc.command, ProviderName: tc.provider})
+			if err != nil {
+				t.Fatalf("buildLaunchCommand: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("command = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProviderAttachRefusesDeadPane(t *testing.T) {
 	fe := &fakeExecutor{
 		outs: []string{"", "1"},

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // Compile-time check.
@@ -126,6 +127,51 @@ func TestProvider_StartWithEnv(t *testing.T) {
 	}
 	if val != "hello" {
 		t.Fatalf("GC_TEST: got %q, want %q", val, "hello")
+	}
+}
+
+func TestProvider_StartUnsetsControllerColorEnvironment(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	t.Setenv("CI", "1")
+	t.Setenv("NO_COLOR", "1")
+	t.Setenv("CIRCLECI", "true")
+
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gc-test-color-%d", time.Now().UnixNano())
+	p := NewProviderWithConfig(cfg)
+	t.Cleanup(func() { _ = p.TeardownServer() })
+	name := "gc-test-adapter-color-env"
+
+	outPath := filepath.Join(t.TempDir(), "env.txt")
+	script := "env > " + shellquote.Quote(outPath) + "; sleep 300"
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command:      "sh -c " + shellquote.Quote(script),
+		ProviderName: "claude",
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err := os.ReadFile(outPath)
+		if err == nil {
+			env := string(data)
+			for _, line := range strings.Split(env, "\n") {
+				if strings.HasPrefix(line, "CI=") || strings.HasPrefix(line, "NO_COLOR=") {
+					t.Fatalf("interactive pane inherited color-killing environment:\n%s", env)
+				}
+			}
+			if !strings.Contains(env, "CIRCLECI=true") {
+				t.Fatalf("unrelated CI-vendor environment was removed:\n%s", env)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("interactive pane did not write environment: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

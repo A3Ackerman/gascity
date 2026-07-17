@@ -119,6 +119,13 @@ func TestInstallClaude(t *testing.T) {
 	if !ok {
 		t.Fatal("expected /city/.gc/settings.json to be written")
 	}
+	var settings map[string]any
+	if err := json.Unmarshal(runtimeData, &settings); err != nil {
+		t.Fatalf("runtime settings are not JSON: %v", err)
+	}
+	if got := settings["theme"]; got != "dark" {
+		t.Fatalf("runtime theme = %#v, want dark", got)
+	}
 	s := string(runtimeData)
 	if !strings.Contains(s, "SessionStart") {
 		t.Error("claude settings should contain SessionStart hook")
