@@ -141,10 +141,15 @@ func TestProvider_StartUnsetsControllerColorEnvironment(t *testing.T) {
 	name := "gc-test-adapter-color-env"
 
 	outPath := filepath.Join(t.TempDir(), "env.txt")
+	tmpPath := outPath + ".tmp"
 	ready := "gc-test-color-ready"
-	script := "env > " + shellquote.Quote(outPath) + "; tmux -L " + shellquote.Quote(cfg.SocketName) + " wait-for -S " + shellquote.Quote(ready) + "; sleep 300"
+	script := "env > " + shellquote.Quote(tmpPath) + "; mv " + shellquote.Quote(tmpPath) + " " + shellquote.Quote(outPath) + "; tmux -L " + shellquote.Quote(cfg.SocketName) + " wait-for -S " + shellquote.Quote(ready) + "; sleep 300"
+	commandPath := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(commandPath, []byte("#!/bin/sh\n"+script+"\n"), 0o700); err != nil {
+		t.Fatalf("writing Claude fixture: %v", err)
+	}
 	if err := p.Start(context.Background(), name, runtime.Config{
-		Command:      "sh -c " + shellquote.Quote(script),
+		Command:      shellquote.Quote(commandPath),
 		ProviderName: "claude",
 		Env: map[string]string{
 			"CI":       "1",

@@ -1383,19 +1383,24 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 // (~2KB) so large prompts cause "command too long" errors.
 const maxInlinePromptLen = 1024
 
-func wrapInteractiveColorEnv(providerName, command string) string {
-	if command == "" {
-		return command
+func shouldUnsetInteractiveColorEnv(command string) bool {
+	args := shellquote.Split(command)
+	if len(args) == 0 {
+		return false
 	}
-	if base, _, ok := strings.Cut(providerName, "/"); ok {
-		providerName = base
-	}
-	switch providerName {
+	switch filepath.Base(args[0]) {
 	case "claude", "codex":
-		return "env -u CI -u NO_COLOR " + command
+		return true
 	default:
+		return false
+	}
+}
+
+func wrapInteractiveColorEnv(command string, unset bool) string {
+	if command == "" || !unset {
 		return command
 	}
+	return "env -u CI -u NO_COLOR " + command
 }
 
 // buildLaunchCommand computes the full agent command line for a session, writing
@@ -1405,6 +1410,7 @@ func wrapInteractiveColorEnv(providerName, command string) string {
 // (relaunch into a warm box) so both produce an identical agent command.
 func buildLaunchCommand(name string, cfg runtime.Config) (fullCommand, promptFile string, err error) {
 	fullCommand = cfg.Command
+	unsetColorEnv := shouldUnsetInteractiveColorEnv(cfg.Command)
 	switch {
 	case cfg.PromptSuffix == "":
 	case len(cfg.PromptSuffix) > maxInlinePromptLen:
@@ -1423,7 +1429,7 @@ func buildLaunchCommand(name string, cfg runtime.Config) (fullCommand, promptFil
 	default:
 		fullCommand += " " + cfg.PromptSuffix
 	}
-	return wrapInteractiveColorEnv(cfg.ProviderName, fullCommand), promptFile, nil
+	return wrapInteractiveColorEnv(fullCommand, unsetColorEnv), promptFile, nil
 }
 
 func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
