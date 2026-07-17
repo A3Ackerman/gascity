@@ -3,7 +3,6 @@
   "enableAllProjectMcpServers": true,
   "editorMode": "normal",
   "awaySummaryEnabled": false,
-  "theme": "dark",
   "hooks": {
     "SessionStart": [
       {

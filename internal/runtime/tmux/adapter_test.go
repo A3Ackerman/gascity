@@ -134,10 +134,6 @@ func TestProvider_StartUnsetsControllerColorEnvironment(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
-	t.Setenv("CI", "1")
-	t.Setenv("NO_COLOR", "1")
-	t.Setenv("CIRCLECI", "true")
-
 	cfg := DefaultConfig()
 	cfg.SocketName = fmt.Sprintf("gc-test-color-%d", time.Now().UnixNano())
 	p := NewProviderWithConfig(cfg)
@@ -145,33 +141,37 @@ func TestProvider_StartUnsetsControllerColorEnvironment(t *testing.T) {
 	name := "gc-test-adapter-color-env"
 
 	outPath := filepath.Join(t.TempDir(), "env.txt")
-	script := "env > " + shellquote.Quote(outPath) + "; sleep 300"
+	ready := "gc-test-color-ready"
+	script := "env > " + shellquote.Quote(outPath) + "; tmux -L " + shellquote.Quote(cfg.SocketName) + " wait-for -S " + shellquote.Quote(ready) + "; sleep 300"
 	if err := p.Start(context.Background(), name, runtime.Config{
 		Command:      "sh -c " + shellquote.Quote(script),
 		ProviderName: "claude",
+		Env: map[string]string{
+			"CI":       "1",
+			"NO_COLOR": "1",
+			"CIRCLECI": "true",
+		},
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		data, err := os.ReadFile(outPath)
-		if err == nil {
-			env := string(data)
-			for _, line := range strings.Split(env, "\n") {
-				if strings.HasPrefix(line, "CI=") || strings.HasPrefix(line, "NO_COLOR=") {
-					t.Fatalf("interactive pane inherited color-killing environment:\n%s", env)
-				}
-			}
-			if !strings.Contains(env, "CIRCLECI=true") {
-				t.Fatalf("unrelated CI-vendor environment was removed:\n%s", env)
-			}
-			break
+	readyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := p.Tmux().runCtx(readyCtx, "wait-for", ready); err != nil {
+		t.Fatalf("waiting for pane environment signal: %v", err)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading pane environment after readiness signal: %v", err)
+	}
+	env := string(data)
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "CI=") || strings.HasPrefix(line, "NO_COLOR=") {
+			t.Fatalf("interactive pane inherited color-killing environment:\n%s", env)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("interactive pane did not write environment: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(env, "CIRCLECI=true") {
+		t.Fatalf("unrelated CI-vendor environment was removed:\n%s", env)
 	}
 }
 
