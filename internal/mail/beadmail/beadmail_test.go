@@ -2757,6 +2757,8 @@ func TestMarkUnreadReopensClosedMessage(t *testing.T) {
 		Title:    "HANDOFF: test",
 		Type:     "message",
 		Assignee: "cheryl",
+		Labels:   []string{mail.HandoffLabel},
+		Metadata: map[string]string{"close_reason": RetentionSweepCloseReason},
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)

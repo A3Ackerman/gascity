@@ -299,7 +299,7 @@ func recordResetStallIfDue(
 // yield a fresh session" (re-runnable) for "healthy session destroyed"
 // (unrecoverable) — the safe direction.
 func clearStaleResetMarkerIfHealthy(
-	session *beads.Bead,
+	info sessionpkg.Info,
 	store beads.Store,
 	sp runtime.Provider,
 	template string,
@@ -312,10 +312,10 @@ func clearStaleResetMarkerIfHealthy(
 	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) {
-	if session == nil || store == nil || sp == nil || !alive || startupTimeout <= 0 {
+	if store == nil || sp == nil || !alive || startupTimeout <= 0 {
 		return
 	}
-	resetCommittedAt, committedAt, pending := resetPendingCommittedAt(*session)
+	resetCommittedAt, committedAt, pending := resetPendingCommittedAtInfo(info)
 	if !pending {
 		return
 	}
@@ -343,20 +343,14 @@ func clearStaleResetMarkerIfHealthy(
 		"continuation_reset_pending":   "",
 		sessionpkg.ResetCommittedAtKey: "",
 	}
-	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+	if err := store.SetMetadataBatch(info.ID, batch); err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing stale reset marker for %s: %v\n", name, err) //nolint:errcheck
 		}
 		return
 	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string, len(batch))
-	}
-	for k, v := range batch {
-		session.Metadata[k] = v
-	}
 	if dt != nil {
-		dt.clearResetStall(session.ID)
+		dt.clearResetStall(info.ID)
 	}
 	elapsedSeconds := int(elapsed / time.Second)
 	msg := fmt.Sprintf(
@@ -382,7 +376,7 @@ func clearStaleResetMarkerIfHealthy(
 			template,
 			name,
 			map[string]any{
-				"bead_id":            session.ID,
+				"bead_id":            info.ID,
 				"evidence":           evidence,
 				"elapsed_s":          elapsedSeconds,
 				"reset_committed_at": resetCommittedAt,
@@ -727,7 +721,7 @@ func finalizeDrainAckStoppedSession(
 	if hasAssignedWork {
 		batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), string(sessionpkg.SleepReasonIdle), info.WakeMode == "fresh")
 	}
-	sessionpkg.StampPriorSessionKey(batch, session.Metadata)
+	sessionpkg.StampPriorSessionKeyInfo(batch, info)
 	// An always-mode named session with wake_mode=fresh re-qualifies for wake
 	// the moment its drain-ack lands: ComputeAwakeSet's named-always branch has
 	// no drained-exclusion, and drain-ack pokes an immediate reconcile. A
@@ -737,8 +731,8 @@ func finalizeDrainAckStoppedSession(
 	// hard wake blocker and an explicit wake request (nudge/attach) clears it,
 	// so urgent demand still wakes the session immediately.
 	if !hasAssignedWork &&
-		session.Metadata["wake_mode"] == "fresh" &&
-		strings.TrimSpace(session.Metadata[sessionpkg.NamedSessionModeMetadata]) == "always" {
+		info.WakeMode == "fresh" &&
+		strings.TrimSpace(info.ConfiguredNamedMode) == "always" {
 		batch["held_until"] = clk.Now().Add(freshWakeHeartbeatCooldown).UTC().Format(time.RFC3339)
 	}
 	// A drain-ack that completes a restart-request cycle (gc session reset →
@@ -2308,9 +2302,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
 		recordResetStallIfDue(infoByID[id], tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
-		if raw, err := store.Get(id); err == nil {
-			clearStaleResetMarkerIfHealthy(&raw, store, sp, tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
-		}
+		clearStaleResetMarkerIfHealthy(infoByID[id], store, sp, tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
 		// markProviderTerminalError persists + folds its write onto the snapshot in one
@@ -2934,7 +2926,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							continue
 						}
-						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(session.Metadata["core_hash_breakdown"], agentCfg)
+						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(infoByID[id].CoreHashBreakdown, agentCfg)
 						// Prompt-only drift (FPExtra: append_fragments and
 						// other rendered-prompt inputs) applies LAZILY: it
 						// only affects the NEXT conversation, so it is never
@@ -2947,9 +2939,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// whole roster after guard expiry.
 						if configDriftLazyApplicable(driftedFields) {
 							if trace != nil {
-								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredLazy), configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredLazy, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 									"active_reason": "lazy_prompt_only",
-								}), nil, "")
+								}))
 							}
 							continue
 						}
@@ -5459,7 +5451,7 @@ func resetConfiguredNamedSessionForConfigDriftInfo(
 	if preserveResume {
 		batch["started_config_hash"] = priorStartedConfigHash
 	}
-	sessionpkg.StampPriorSessionKey(batch, session.Metadata)
+	sessionpkg.StampPriorSessionKeyInfo(batch, info)
 	batch[namedSessionConfigDriftDeferredAtMetadata] = ""
 	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""
