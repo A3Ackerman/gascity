@@ -3353,9 +3353,11 @@ type SessionResponse struct {
 	AgentKind              *string                 `json:"agent_kind,omitempty"`
 	Alias                  *string                 `json:"alias,omitempty"`
 	Attached               bool                    `json:"attached"`
-	ConfiguredNamedSession *bool                   `json:"configured_named_session,omitempty"`
+	BaseState              string                  `json:"base_state"`
+	ConfiguredNamedSession bool                    `json:"configured_named_session"`
 	ContextPct             *int64                  `json:"context_pct,omitempty"`
 	ContextWindow          *int64                  `json:"context_window,omitempty"`
+	ControlPlane           bool                    `json:"control_plane"`
 	CreatedAt              string                  `json:"created_at"`
 	DisplayName            *string                 `json:"display_name,omitempty"`
 	Id                     string                  `json:"id"`
@@ -3365,13 +3367,16 @@ type SessionResponse struct {
 	LastOutput             *string                 `json:"last_output,omitempty"`
 	Metadata               *map[string]string      `json:"metadata,omitempty"`
 	Model                  *string                 `json:"model,omitempty"`
+	NavigatorSchemaVersion string                  `json:"navigator_schema_version"`
 	Options                *map[string]string      `json:"options,omitempty"`
 	Pool                   *string                 `json:"pool,omitempty"`
+	PoolManaged            bool                    `json:"pool_managed"`
 	Provider               string                  `json:"provider"`
 	Reason                 *string                 `json:"reason,omitempty"`
 	Rig                    *string                 `json:"rig,omitempty"`
 	Running                bool                    `json:"running"`
 	SessionName            string                  `json:"session_name"`
+	SessionOrigin          *string                 `json:"session_origin,omitempty"`
 	State                  string                  `json:"state"`
 	SubmissionCapabilities *SubmissionCapabilities `json:"submission_capabilities,omitempty"`
 	Template               string                  `json:"template"`
