@@ -3229,9 +3229,11 @@ export type SessionResponse = {
     agent_kind?: string;
     alias?: string;
     attached: boolean;
-    configured_named_session?: boolean;
+    base_state: string;
+    configured_named_session: boolean;
     context_pct?: number;
     context_window?: number;
+    control_plane: boolean;
     created_at: string;
     display_name?: string;
     id: string;
@@ -3243,15 +3245,18 @@ export type SessionResponse = {
         [key: string]: string;
     };
     model?: string;
+    navigator_schema_version: string;
     options?: {
         [key: string]: string;
     };
     pool?: string;
+    pool_managed: boolean;
     provider: string;
     reason?: string;
     rig?: string;
     running: boolean;
     session_name: string;
+    session_origin?: string;
     state: string;
     submission_capabilities?: SubmissionCapabilities;
     template: string;
