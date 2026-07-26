@@ -32,7 +32,6 @@ import (
 func TestSkillInstallDirsPerProviderAcrossScopes(t *testing.T) {
 	clearGCEnv(t)
 	cityPath := t.TempDir()
-	t.Setenv("GC_HOME", t.TempDir())
 
 	// The pack ships a shared "mayor" skill (as the gascity pack does).
 	writeSkillSource(t, filepath.Join(cityPath, "skills", "mayor"))
