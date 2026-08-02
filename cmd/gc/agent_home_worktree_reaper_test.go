@@ -15,6 +15,60 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+type fakeStoppedAgentHomeGit struct {
+	isRepo       bool
+	dirty        bool
+	unpushed     bool
+	unpushedErr  error
+	stashes      bool
+	stashesErr   error
+	branch       string
+	removeErr    error
+	removedPath  string
+	removedForce bool
+	movedFrom    string
+	movedTo      string
+	moveErr      error
+	worktrees    []git.Worktree
+	worktreeErr  error
+	onMove       func(oldPath, newPath string)
+}
+
+func (f *fakeStoppedAgentHomeGit) IsRepo() bool             { return f.isRepo }
+func (f *fakeStoppedAgentHomeGit) HasUncommittedWork() bool { return f.dirty }
+func (f *fakeStoppedAgentHomeGit) HasUnpushedCommitsResult() (bool, error) {
+	return f.unpushed, f.unpushedErr
+}
+func (f *fakeStoppedAgentHomeGit) HasStashesResult() (bool, error) { return f.stashes, f.stashesErr }
+func (f *fakeStoppedAgentHomeGit) CurrentBranch() (string, error)  { return f.branch, nil }
+func (f *fakeStoppedAgentHomeGit) WorktreeRemove(path string, force bool) error {
+	f.removedPath, f.removedForce = path, force
+	return f.removeErr
+}
+func (f *fakeStoppedAgentHomeGit) WorktreeList() ([]git.Worktree, error) {
+	return f.worktrees, f.worktreeErr
+}
+func (f *fakeStoppedAgentHomeGit) WorktreeMove(oldPath, newPath string) error {
+	f.movedFrom, f.movedTo = oldPath, newPath
+	if f.moveErr != nil {
+		return f.moveErr
+	}
+	if _, err := os.Stat(oldPath); err == nil {
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return err
+		}
+	}
+	for i := range f.worktrees {
+		if f.worktrees[i].Path == oldPath {
+			f.worktrees[i].Path = newPath
+		}
+	}
+	if f.onMove != nil {
+		f.onMove(oldPath, newPath)
+	}
+	return nil
+}
+
 func namedHomeReaperFixture(t *testing.T) (string, *config.City, string, beads.Bead) {
 	t.Helper()
 	cityPath := t.TempDir()
@@ -77,7 +131,7 @@ func TestDiscoverStoppedAgentHomeCandidatesPreservesSharedHistory(t *testing.T) 
 		t.Fatalf("candidates = %#v, want one candidate with both historical owners", got)
 	}
 	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-work", Status: "in_progress", Assignee: second.ID}}, nil)
-	probe := &fakeBeadWorktreeGit{isRepo: true, worktrees: []git.Worktree{{Path: home}}}
+	probe := &fakeStoppedAgentHomeGit{isRepo: true, worktrees: []git.Worktree{{Path: home}}}
 	decision := evaluateStoppedAgentHomeCandidate(cityPath, cfg, got[0], nil, store, namedHomeRigStores(), nil, probe, probe.worktrees)
 	if decision.Action != stoppedAgentHomeSkip || !strings.Contains(decision.Reason, "assigned work") {
 		t.Fatalf("shared-history assignment decision = %#v, want assigned-work skip", decision)
@@ -96,15 +150,15 @@ func TestReapStoppedAgentHomesFailsClosedWhenRuntimeListFails(t *testing.T) {
 func TestEvaluateStoppedAgentHomeCandidateFailsClosed(t *testing.T) {
 	cityPath, cfg, home, session := namedHomeReaperFixture(t)
 	candidate := stoppedAgentHomeCandidate{Rig: "qcore", Path: home, Session: session, Owners: []beads.Bead{session}}
-	healthy := func() *fakeBeadWorktreeGit {
-		return &fakeBeadWorktreeGit{isRepo: true, branch: "refinery/old", worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
+	healthy := func() *fakeStoppedAgentHomeGit {
+		return &fakeStoppedAgentHomeGit{isRepo: true, branch: "refinery/old", worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
 	}
 	cityStore := beads.NewMemStore()
 
 	tests := []struct {
 		name      string
 		candidate stoppedAgentHomeCandidate
-		git       *fakeBeadWorktreeGit
+		git       *fakeStoppedAgentHomeGit
 		running   map[string]bool
 		active    []beads.Bead
 		store     beads.Store
@@ -112,10 +166,10 @@ func TestEvaluateStoppedAgentHomeCandidateFailsClosed(t *testing.T) {
 		contains  string
 	}{
 		{name: "safe", candidate: candidate, git: healthy(), store: cityStore, want: stoppedAgentHomeRemove},
-		{name: "dirty", candidate: candidate, git: &fakeBeadWorktreeGit{isRepo: true, dirty: true, worktrees: []git.Worktree{{Path: home}}}, store: cityStore, want: stoppedAgentHomeSkip, contains: "uncommitted"},
-		{name: "unpushed", candidate: candidate, git: &fakeBeadWorktreeGit{isRepo: true, unpushed: true, worktrees: []git.Worktree{{Path: home}}}, store: cityStore, want: stoppedAgentHomeSkip, contains: "unpushed"},
-		{name: "stash", candidate: candidate, git: &fakeBeadWorktreeGit{isRepo: true, stashes: true, worktrees: []git.Worktree{{Path: home}}}, store: cityStore, want: stoppedAgentHomeSkip, contains: "stashed"},
-		{name: "probe error", candidate: candidate, git: &fakeBeadWorktreeGit{isRepo: true, unpushedErr: errors.New("boom"), worktrees: []git.Worktree{{Path: home}}}, store: cityStore, want: stoppedAgentHomeSkip, contains: "probe failed"},
+		{name: "dirty", candidate: candidate, git: &fakeStoppedAgentHomeGit{isRepo: true, dirty: true, worktrees: []git.Worktree{{Path: home}}}, store: cityStore, want: stoppedAgentHomeSkip, contains: "uncommitted"},
+		{name: "unpushed", candidate: candidate, git: &fakeStoppedAgentHomeGit{isRepo: true, unpushed: true, worktrees: []git.Worktree{{Path: home}}}, store: cityStore, want: stoppedAgentHomeSkip, contains: "unpushed"},
+		{name: "stash", candidate: candidate, git: &fakeStoppedAgentHomeGit{isRepo: true, stashes: true, worktrees: []git.Worktree{{Path: home}}}, store: cityStore, want: stoppedAgentHomeSkip, contains: "stashed"},
+		{name: "probe error", candidate: candidate, git: &fakeStoppedAgentHomeGit{isRepo: true, unpushedErr: errors.New("boom"), worktrees: []git.Worktree{{Path: home}}}, store: cityStore, want: stoppedAgentHomeSkip, contains: "probe failed"},
 		{name: "runtime live", candidate: candidate, git: healthy(), running: map[string]bool{"qcore--refinery": true}, store: cityStore, want: stoppedAgentHomeSkip, contains: "runtime session is live"},
 		{name: "active path", candidate: candidate, git: healthy(), store: cityStore, active: []beads.Bead{{ID: "ga-live", Status: "open", Metadata: map[string]string{"work_dir": home}}}, want: stoppedAgentHomeSkip, contains: "active session"},
 		{name: "assignment store unavailable", candidate: candidate, git: healthy(), store: nil, want: stoppedAgentHomeSkip, contains: "assignment"},
@@ -142,7 +196,7 @@ func TestEvaluateStoppedAgentHomeCandidateSkipsLiveAssignedAndNested(t *testing.
 		t.Fatal(err)
 	}
 	cityStore := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-work", Status: "in_progress", Assignee: "qcore/refinery"}}, nil)
-	probe := &fakeBeadWorktreeGit{isRepo: true, worktrees: []git.Worktree{{Path: home}, {Path: nested}}}
+	probe := &fakeStoppedAgentHomeGit{isRepo: true, worktrees: []git.Worktree{{Path: home}, {Path: nested}}}
 
 	got := evaluateStoppedAgentHomeCandidate(cityPath, cfg, candidate, nil, cityStore, namedHomeRigStores(), nil, probe, probe.worktrees)
 	if got.Action != stoppedAgentHomeSkip || !strings.Contains(got.Reason, "assigned work") {
@@ -159,10 +213,10 @@ func TestEvaluateStoppedAgentHomeCandidateSkipsLiveAssignedAndNested(t *testing.
 func TestReapStoppedAgentHomesDryRunReportsSizeAndNeverMutates(t *testing.T) {
 	cityPath, cfg, home, session := namedHomeReaperFixture(t)
 	cityStore := beads.NewMemStoreFrom(1, []beads.Bead{session}, nil)
-	rigProbe := &fakeBeadWorktreeGit{isRepo: true, worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
-	homeProbe := &fakeBeadWorktreeGit{isRepo: true, branch: "refinery/old"}
+	rigProbe := &fakeStoppedAgentHomeGit{isRepo: true, worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
+	homeProbe := &fakeStoppedAgentHomeGit{isRepo: true, branch: "refinery/old"}
 	oldFactory := newStoppedAgentHomeGitProbe
-	newStoppedAgentHomeGitProbe = func(path string) beadWorktreeGitProbe {
+	newStoppedAgentHomeGitProbe = func(path string) stoppedAgentHomeGitProbe {
 		if path == filepath.Join(cityPath, "rig") {
 			return rigProbe
 		}
@@ -182,10 +236,10 @@ func TestReapStoppedAgentHomesDryRunReportsSizeAndNeverMutates(t *testing.T) {
 
 func TestReapStoppedAgentHomesRemovesOnlyThroughNonForceGit(t *testing.T) {
 	cityPath, cfg, home, session := namedHomeReaperFixture(t)
-	rigProbe := &fakeBeadWorktreeGit{isRepo: true, worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
-	homeProbe := &fakeBeadWorktreeGit{isRepo: true, branch: "refinery/old"}
+	rigProbe := &fakeStoppedAgentHomeGit{isRepo: true, worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
+	homeProbe := &fakeStoppedAgentHomeGit{isRepo: true, branch: "refinery/old"}
 	oldFactory := newStoppedAgentHomeGitProbe
-	newStoppedAgentHomeGitProbe = func(path string) beadWorktreeGitProbe {
+	newStoppedAgentHomeGitProbe = func(path string) stoppedAgentHomeGitProbe {
 		if path == filepath.Join(cityPath, "rig") {
 			return rigProbe
 		}
@@ -208,10 +262,10 @@ func TestReapStoppedAgentHomesRefreshesSessionOwnershipBeforeMutation(t *testing
 	opened.Status = "open"
 	opened.Metadata = map[string]string{"session_name": "qcore--new-refinery", "alias": "qcore/refinery", "work_dir": home, "template": "qcore/worker", namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "qcore/refinery"}
 	cityStore := beads.NewMemStoreFrom(1, []beads.Bead{closed, opened}, nil)
-	rigProbe := &fakeBeadWorktreeGit{isRepo: true, worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
-	homeProbe := &fakeBeadWorktreeGit{isRepo: true, branch: "refinery/old"}
+	rigProbe := &fakeStoppedAgentHomeGit{isRepo: true, worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
+	homeProbe := &fakeStoppedAgentHomeGit{isRepo: true, branch: "refinery/old"}
 	oldFactory := newStoppedAgentHomeGitProbe
-	newStoppedAgentHomeGitProbe = func(path string) beadWorktreeGitProbe {
+	newStoppedAgentHomeGitProbe = func(path string) stoppedAgentHomeGitProbe {
 		if path == filepath.Join(cityPath, "rig") {
 			return rigProbe
 		}
@@ -290,7 +344,7 @@ func TestDiscoverStoppedAgentHomeCandidatesFindsConfiguredNamepoolLayout(t *test
 func TestEvaluateStoppedAgentHomeCandidateRejectsOverlappingActiveSessionPaths(t *testing.T) {
 	cityPath, cfg, home, session := namedHomeReaperFixture(t)
 	candidate := stoppedAgentHomeCandidate{Rig: "qcore", Path: home, Session: session, Owners: []beads.Bead{session}}
-	probe := &fakeBeadWorktreeGit{isRepo: true, worktrees: []git.Worktree{{Path: home}}}
+	probe := &fakeStoppedAgentHomeGit{isRepo: true, worktrees: []git.Worktree{{Path: home}}}
 	for _, activePath := range []string{filepath.Join(home, "nested"), filepath.Dir(home)} {
 		if err := os.MkdirAll(activePath, 0o755); err != nil {
 			t.Fatal(err)
@@ -307,7 +361,7 @@ func TestEvaluateStoppedAgentHomeCandidateRequiresCompleteRigStoreSnapshot(t *te
 	cityPath, cfg, home, session := namedHomeReaperFixture(t)
 	cfg.Rigs = append(cfg.Rigs, config.Rig{Name: "other", Path: filepath.Join(cityPath, "other")})
 	candidate := stoppedAgentHomeCandidate{Rig: "qcore", Path: home, Session: session, Owners: []beads.Bead{session}}
-	probe := &fakeBeadWorktreeGit{isRepo: true, worktrees: []git.Worktree{{Path: home}}}
+	probe := &fakeStoppedAgentHomeGit{isRepo: true, worktrees: []git.Worktree{{Path: home}}}
 	got := evaluateStoppedAgentHomeCandidate(cityPath, cfg, candidate, nil, beads.NewMemStore(), map[string]beads.Store{"qcore": beads.NewMemStore()}, nil, probe, probe.worktrees)
 	if got.Action != stoppedAgentHomeSkip || !strings.Contains(got.Reason, "rig store snapshot incomplete") {
 		t.Fatalf("decision = %#v, want incomplete-store skip", got)
@@ -317,7 +371,7 @@ func TestEvaluateStoppedAgentHomeCandidateRequiresCompleteRigStoreSnapshot(t *te
 func TestEvaluateStoppedAgentHomeCandidateRejectsMissingOwnerHistory(t *testing.T) {
 	cityPath, cfg, home, session := namedHomeReaperFixture(t)
 	candidate := stoppedAgentHomeCandidate{Rig: "qcore", Path: home, Session: session}
-	probe := &fakeBeadWorktreeGit{isRepo: true, worktrees: []git.Worktree{{Path: home}}}
+	probe := &fakeStoppedAgentHomeGit{isRepo: true, worktrees: []git.Worktree{{Path: home}}}
 	got := evaluateStoppedAgentHomeCandidate(cityPath, cfg, candidate, nil, beads.NewMemStore(), namedHomeRigStores(), nil, probe, probe.worktrees)
 	if got.Action != stoppedAgentHomeSkip || !strings.Contains(got.Reason, "owner history unavailable") {
 		t.Fatalf("decision = %#v, want missing-owner skip", got)
@@ -326,10 +380,10 @@ func TestEvaluateStoppedAgentHomeCandidateRejectsMissingOwnerHistory(t *testing.
 
 func TestReapStoppedAgentHomesQuarantinesBeforeNonForceRemoval(t *testing.T) {
 	cityPath, cfg, home, session := namedHomeReaperFixture(t)
-	rigProbe := &fakeBeadWorktreeGit{isRepo: true, worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
-	homeProbe := &fakeBeadWorktreeGit{isRepo: true, branch: "refinery/old"}
+	rigProbe := &fakeStoppedAgentHomeGit{isRepo: true, worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
+	homeProbe := &fakeStoppedAgentHomeGit{isRepo: true, branch: "refinery/old"}
 	oldFactory := newStoppedAgentHomeGitProbe
-	newStoppedAgentHomeGitProbe = func(path string) beadWorktreeGitProbe {
+	newStoppedAgentHomeGitProbe = func(path string) stoppedAgentHomeGitProbe {
 		if path == filepath.Join(cityPath, "rig") {
 			return rigProbe
 		}
@@ -347,10 +401,10 @@ func TestReapStoppedAgentHomesQuarantinesBeforeNonForceRemoval(t *testing.T) {
 
 func TestReapStoppedAgentHomesDryRunReportsAllGateResults(t *testing.T) {
 	cityPath, cfg, home, session := namedHomeReaperFixture(t)
-	rigProbe := &fakeBeadWorktreeGit{isRepo: true, worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
-	homeProbe := &fakeBeadWorktreeGit{isRepo: true, branch: "refinery/old"}
+	rigProbe := &fakeStoppedAgentHomeGit{isRepo: true, worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
+	homeProbe := &fakeStoppedAgentHomeGit{isRepo: true, branch: "refinery/old"}
 	oldFactory := newStoppedAgentHomeGitProbe
-	newStoppedAgentHomeGitProbe = func(path string) beadWorktreeGitProbe {
+	newStoppedAgentHomeGitProbe = func(path string) stoppedAgentHomeGitProbe {
 		if path == filepath.Join(cityPath, "rig") {
 			return rigProbe
 		}
@@ -370,8 +424,8 @@ func TestReapStoppedAgentHomesDryRunReportsAllGateResults(t *testing.T) {
 func TestReapStoppedAgentHomesRestoresWhenOwnerAppearsAfterQuarantine(t *testing.T) {
 	cityPath, cfg, home, session := namedHomeReaperFixture(t)
 	cityStore := beads.NewMemStoreFrom(1, []beads.Bead{session}, nil)
-	rigProbe := &fakeBeadWorktreeGit{isRepo: true, worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
-	homeProbe := &fakeBeadWorktreeGit{isRepo: true, branch: "refinery/old"}
+	rigProbe := &fakeStoppedAgentHomeGit{isRepo: true, worktrees: []git.Worktree{{Path: home, Branch: "refs/heads/refinery/old"}}}
+	homeProbe := &fakeStoppedAgentHomeGit{isRepo: true, branch: "refinery/old"}
 	created := false
 	rigProbe.onMove = func(oldPath, _ string) {
 		if created || oldPath != home {
@@ -386,7 +440,7 @@ func TestReapStoppedAgentHomesRestoresWhenOwnerAppearsAfterQuarantine(t *testing
 		}
 	}
 	oldFactory := newStoppedAgentHomeGitProbe
-	newStoppedAgentHomeGitProbe = func(path string) beadWorktreeGitProbe {
+	newStoppedAgentHomeGitProbe = func(path string) stoppedAgentHomeGitProbe {
 		if path == filepath.Join(cityPath, "rig") {
 			return rigProbe
 		}

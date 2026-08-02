@@ -145,7 +145,7 @@ func TestResolveFormulaScope_GCRigEnv(t *testing.T) {
 	rigFlag = ""
 	t.Setenv("GC_RIG", "my-project")
 
-	scope, err := resolveFormulaScope(cfg, cityPath)
+	scope, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveFormulaScope: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestResolveFormulaScope_GCRigEnv(t *testing.T) {
 
 	// An explicit --rig flag still beats GC_RIG.
 	rigFlag = "other-rig"
-	scope, err = resolveFormulaScope(cfg, cityPath)
+	scope, err = resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveFormulaScope (--rig over env): %v", err)
 	}
@@ -192,7 +192,7 @@ func TestResolveFormulaScope_GCRigEnvUnknownFallsThrough(t *testing.T) {
 
 	for _, env := range []string{"ghost", "unbound"} {
 		t.Setenv("GC_RIG", env)
-		scope, err := resolveFormulaScope(cfg, cityPath)
+		scope, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 		if err != nil {
 			t.Fatalf("resolveFormulaScope (GC_RIG=%s): %v", env, err)
 		}
