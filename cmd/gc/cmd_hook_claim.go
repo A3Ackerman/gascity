@@ -168,16 +168,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{}
 	}
 
-	if result, bead, ok := hookClaimExistingOrAssigned(candidates, *opts); ok {
-		if result.Reason == "ready_assignment" {
-			adoptCtx, adoptCancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
-			if err := ops.Adopt(adoptCtx, dir, opts.Env, bead.ID, opts.Assignee); err != nil {
-				fmt.Fprintf(stderr, "gc hook --claim: adopting %s: %v\n", bead.ID, err) //nolint:errcheck
-			} else {
-				result.Assignee = opts.Assignee
-			}
-			adoptCancel()
-		}
+	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, stdout, stderr)}
 	}
 
@@ -420,30 +411,6 @@ func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions)
 				Route:         hookClaimRoute(candidate),
 			}
 			return result, candidate, true
-		}
-	}
-	return hookClaimJSONResult{}, beads.Bead{}, false
-}
-
-func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
-	if result, candidate, ok := hookClaimExistingAssignment(candidates, opts); ok {
-		return result, candidate, true
-	}
-	for _, candidate := range candidates {
-		if hookClaimCandidateIsMessage(candidate) {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(candidate.Status), "open") && hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) {
-			return hookClaimJSONResult{
-				SchemaVersion: "1",
-				OK:            true,
-				Command:       hookClaimCommandName,
-				Action:        "work",
-				Reason:        "ready_assignment",
-				BeadID:        candidate.ID,
-				Assignee:      candidate.Assignee,
-				Route:         hookClaimRoute(candidate),
-			}, candidate, true
 		}
 	}
 	return hookClaimJSONResult{}, beads.Bead{}, false
