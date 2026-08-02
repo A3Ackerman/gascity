@@ -5224,6 +5224,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRigProvisionProgress) | ({
     type: 'session.cold_start_timeout';
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
+    type: 'session.config_drift_wave';
+} & TypedEventStreamEnvelopeSessionConfigDriftWave) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.drain_acked_with_assigned_work';
@@ -6224,6 +6226,23 @@ export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.config_drift_wave
+ */
+export type TypedEventStreamEnvelopeSessionConfigDriftWave = {
+    actor: string;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.config_drift_wave';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.crashed
  */
 export type TypedEventStreamEnvelopeSessionCrashed = {
@@ -6713,6 +6732,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRigProvisionProgress) | ({
     type: 'session.cold_start_timeout';
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
+    type: 'session.config_drift_wave';
+} & TypedTaggedEventStreamEnvelopeSessionConfigDriftWave) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.drain_acked_with_assigned_work';
@@ -7765,6 +7786,24 @@ export type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout = {
     subject?: string;
     ts: string;
     type: 'session.cold_start_timeout';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.config_drift_wave
+ */
+export type TypedTaggedEventStreamEnvelopeSessionConfigDriftWave = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.config_drift_wave';
     workflow?: WorkflowEventProjection;
 };
 
