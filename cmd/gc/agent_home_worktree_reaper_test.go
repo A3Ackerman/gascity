@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type fakeStoppedAgentHomeGit struct {
@@ -469,5 +470,17 @@ func TestListSessionHistoryByMetadataFailsClosedAtCap(t *testing.T) {
 	_, err := listSessionHistoryByMetadata(store, []map[string]string{{"alias": "qcore/refinery"}})
 	if err == nil || !strings.Contains(err.Error(), "history limit") {
 		t.Fatalf("error = %v, want fail-closed history limit", err)
+	}
+}
+
+func TestActiveSessionBeadsUsesCanonicalWorkerDir(t *testing.T) {
+	workerDir := filepath.Join(t.TempDir(), "worker")
+	infos := []sessionpkg.Info{{ID: "ga-session", WorkerDir: workerDir, WorkDir: "/legacy/home", SessionName: "worker-live"}}
+	got := activeSessionBeads(infos)
+	if len(got) != 1 {
+		t.Fatalf("activeSessionBeads() len = %d, want 1", len(got))
+	}
+	if got[0].Metadata["work_dir"] != workerDir {
+		t.Fatalf("active work_dir = %q, want canonical worker_dir %q", got[0].Metadata["work_dir"], workerDir)
 	}
 }

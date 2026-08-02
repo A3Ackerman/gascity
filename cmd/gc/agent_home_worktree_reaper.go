@@ -478,8 +478,9 @@ func activeSessionBeads(infos []sessionpkg.Info) []beads.Bead {
 		if info.Closed {
 			status = "closed"
 		}
+		workerDir := sessionpkg.WorkerDirFromInfo(info)
 		sessions = append(sessions, beads.Bead{ID: info.ID, Type: info.Type, Status: status, Metadata: map[string]string{
-			"work_dir": info.WorkDir, "session_name": info.SessionName, "alias": info.Alias,
+			"work_dir": workerDir, "session_name": info.SessionName, "alias": info.Alias,
 			namedSessionIdentityMetadata: info.ConfiguredNamedIdentity,
 		}})
 	}

@@ -259,9 +259,14 @@ func reapClosedBeadWorktrees(
 			if reason == "" {
 				wg := git.New(worktreePath)
 				hasUncommitted := wg.HasUncommittedWork()
-				hasUnpushed, _ := wg.HasUnpushedCommitsResult()
-				hasStashes, _ := wg.HasStashesResult()
-				if hasUncommitted || hasUnpushed || hasStashes {
+				hasUnpushed, unpushedErr := wg.HasUnpushedCommitsResult()
+				hasStashes, stashesErr := wg.HasStashesResult()
+				switch {
+				case unpushedErr != nil:
+					reason = "unpushed commit probe failed (failing closed): " + unpushedErr.Error()
+				case stashesErr != nil:
+					reason = "stash probe failed (failing closed): " + stashesErr.Error()
+				case hasUncommitted || hasUnpushed || hasStashes:
 					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unpushed=%v stashes=%v", hasUncommitted, hasUnpushed, hasStashes)
 				}
 			}

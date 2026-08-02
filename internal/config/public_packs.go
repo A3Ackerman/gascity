@@ -40,8 +40,8 @@ const (
 	// NOTE (platform fork): this pin names a commit on the carry/operational
 	// fork, not a gastownhall/gascity commit — the fork IS the distribution
 	// for this machine's cities, and the binary serves the pinned content from
-	// its embedded FS. Carries the ga-a8w1c mirror-verification freshness fix.
-	BundledPackImportVersion = "sha:e37a541e1dc4444e0792272d4029e0b330d82616"
+	// its embedded FS. Carries the final Dolt mirror freshness/health semantics.
+	BundledPackImportVersion = "sha:abcf2b639b85f849391ef0daf9ddcd27b0728f0a"
 )
 
 // SupersededBundledPackImportVersions lists previous canonical pins for the
@@ -68,6 +68,9 @@ var SupersededBundledPackImportVersions = []string{
 	// qc-lu207 + OMP hook-v3 pin, superseded by ga-a8w1c's
 	// mirror-verification freshness semantics.
 	"sha:997b8a563e6d460e6716ecf466b8905049f64139",
+	// ga-a8w1c mirror-verification freshness pin, superseded by the
+	// worst-case mirror health semantics carried in the current bundle.
+	"sha:e37a541e1dc4444e0792272d4029e0b330d82616",
 }
 
 // SupersededPublicGastownPackVersions lists previous canonical pins for the

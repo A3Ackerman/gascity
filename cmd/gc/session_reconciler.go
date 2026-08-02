@@ -1680,6 +1680,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if !configDriftWaveAnnounced {
 			configDriftWaveAnnounced = true
 			msg := fmt.Sprintf("config-drift wave: more than %d sessions need drift restarts this tick; rolling %d per tick (first deferred: %s)", maxConfigDriftRestartsPerTick, maxConfigDriftRestartsPerTick, name)
+			configDriftWaveMsg = msg
 			fmt.Fprintf(stderr, "session reconciler: %s\n", msg) //nolint:errcheck
 			rec.Record(events.Event{Type: events.SessionConfigDriftWave, Actor: "gc", Subject: templateName, Message: msg})
 		}
