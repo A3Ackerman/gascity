@@ -54,7 +54,18 @@ func (d stoppedAgentHomeDecision) gateSummary() string {
 	return strings.Join(d.Gates, ",")
 }
 
-var newStoppedAgentHomeGitProbe = func(path string) beadWorktreeGitProbe { return git.New(path) }
+type stoppedAgentHomeGitProbe interface {
+	IsRepo() bool
+	HasUncommittedWork() bool
+	HasUnpushedCommitsResult() (bool, error)
+	HasStashesResult() (bool, error)
+	CurrentBranch() (string, error)
+	WorktreeRemove(path string, force bool) error
+	WorktreeMove(oldPath, newPath string) error
+	WorktreeList() ([]git.Worktree, error)
+}
+
+var newStoppedAgentHomeGitProbe = func(path string) stoppedAgentHomeGitProbe { return git.New(path) }
 
 const stoppedAgentHomeHistoryLimit = 4096
 
@@ -260,7 +271,7 @@ func evaluateStoppedAgentHomeCandidate(
 	cityStore beads.Store,
 	rigStores map[string]beads.Store,
 	activeSessions []beads.Bead,
-	probe beadWorktreeGitProbe,
+	probe stoppedAgentHomeGitProbe,
 	registered []git.Worktree,
 ) stoppedAgentHomeDecision {
 	decision := stoppedAgentHomeDecision{Candidate: candidate, Action: stoppedAgentHomeSkip}
@@ -529,7 +540,10 @@ func reapStoppedAgentHomeWorktrees(
 	}
 	removed := 0
 	for _, candidate := range candidates {
-		rigRoot := configuredRigRoot(cityPath, cfg, candidate.Rig)
+		rigRoot := strings.TrimSpace(rigRootByName(cfg, candidate.Rig))
+		if rigRoot != "" && !filepath.IsAbs(rigRoot) {
+			rigRoot = filepath.Join(cityPath, rigRoot)
+		}
 		if rigRoot == "" {
 			recordStoppedAgentHomeSkip(rec, stderr, candidate, "owning rig root unresolved")
 			continue

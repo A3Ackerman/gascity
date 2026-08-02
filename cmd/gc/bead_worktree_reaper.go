@@ -16,8 +16,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
-	"github.com/gastownhall/gascity/internal/runtime"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
@@ -423,45 +421,6 @@ func rigRootByName(cfg *config.City, rigName string) string {
 		}
 	}
 	return ""
-}
-
-// candidateOwnedByActiveSession reports whether a reap candidate lives inside
-// the work dir of a session that is still live. Takes session.Info rather than
-// raw beads: upstream's WI-7 refactor deleted the snapshot's raw-bead surface
-// (sessionBeadSnapshot.Open), leaving OpenInfos as the sole domain projection,
-// and Info exposes WorkDir/SessionName as typed fields instead of metadata-map
-// lookups.
-func candidateOwnedByActiveSession(candidate beadWorktreeCandidate, sessions []sessionpkg.Info, sp runtime.Provider) (bool, string) {
-	canonicalCandidate, err := filepath.EvalSymlinks(candidate.Path)
-	if err != nil {
-		return true, "candidate path liveness check failed: " + err.Error()
-	}
-	for _, session := range sessions {
-		workDir := strings.TrimSpace(session.WorkDir)
-		if workDir == "" {
-			continue
-		}
-		canonicalWorkDir, err := filepath.EvalSymlinks(workDir)
-		if err != nil {
-			continue
-		}
-		rel, err := filepath.Rel(canonicalWorkDir, canonicalCandidate)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			continue
-		}
-		sessionName := strings.TrimSpace(session.SessionName)
-		if sp == nil || sessionName == "" || sp.IsRunning(sessionName) {
-			return true, "candidate belongs to active or unverifiable session path: " + sessionName
-		}
-	}
-	return false, ""
-}
-
-func recordBeadWorktreeSkip(rec events.Recorder, stderr io.Writer, candidate beadWorktreeCandidate, reason string) {
-	fmt.Fprintf(stderr, "reapClosedBeadWorktrees: skipping %s (bead %s: %s)\n", candidate.Path, candidate.BeadID, reason) //nolint:errcheck
-	if raw, err := json.Marshal(events.BeadWorktreeReapSkippedPayload{BeadID: candidate.BeadID, Path: candidate.Path, Rig: candidate.Rig, Reason: reason}); err == nil {
-		rec.Record(events.Event{Type: events.BeadWorktreeReapSkipped, Actor: "gc", Subject: candidate.BeadID, Payload: raw})
-	}
 }
 
 // extractBeadIDFromWorktreeName scans consecutive dash-separated segment pairs
