@@ -309,10 +309,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	storeFactory := openStoreForCity(cityPath)
 
-	// Data checks.
+	// Data checks. Store schema compatibility remains checkable from the raw
+	// city config even when expanded imports fail to load.
 	if cfgErr == nil && cfg != nil {
 		register(doctor.NewBDSplitStoreCheck(cityPath))
-		register(doctor.NewBeadsStoreCheck(cityPath, openStoreResultForCity(cityPath)))
+	}
+	register(doctor.NewBeadsStoreCheck(cityPath, openStoreResultForCity(cityPath)))
+	if cfgErr == nil && cfg != nil {
 		register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 		register(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
 		register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))

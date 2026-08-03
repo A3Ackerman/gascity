@@ -73,13 +73,17 @@ for whatever you touched. Before building, confirm `go.mod`'s beads pin
 matches installed `bd version` or the version-compat gate disables the
 native store.
 
-Install — stage on the same filesystem, back up, **atomic rename** (the
-supervisor holds the binary open; never `cp` over it):
+
+Install — the candidate doctor and atomic swap are one fail-closed shell block.
+Any blocking doctor failure aborts before staging. Stage on the same filesystem;
+the supervisor holds the binary open, so never `cp` over it:
 
 ```sh
+set -e
+/tmp/gc-new --city ~/gascity doctor
 cp /tmp/gc-new ~/go/bin/gc.staged
-mv ~/go/bin/gc ~/go/bin/gc.bak-$(date +%Y%m%d-%H%M)
-mv ~/go/bin/gc.staged ~/go/bin/gc        # ~/.local/bin/gc symlinks here
+cp ~/go/bin/gc ~/go/bin/gc.bak-$(date +%Y%m%d-%H%M)
+mv ~/go/bin/gc.staged ~/go/bin/gc        # single atomic replacement; ~/.local/bin/gc symlinks here
 launchctl kickstart -k gui/$(id -u)/com.gascity.supervisor
 ```
 

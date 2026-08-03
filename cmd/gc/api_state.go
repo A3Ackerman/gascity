@@ -131,6 +131,10 @@ var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode) (bea
 	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true)
 }
 
+var controllerStatePreflightCityStore = func(cityPath string, cfg *config.City, mode gate.Mode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithConfigOptions(cityPath, cityPath, cfg, mode, true, false, false)
+}
+
 // controllerStateOpenRigStoreAtForCity routes controller rig stores through
 // the same native-selection factory as direct city/rig store opens. Tests swap
 // this seam to avoid opening real native Dolt handles.
@@ -199,21 +203,32 @@ func newControllerState(
 	for _, n := range cs.rolloutFlags.Notices() {
 		cs.rolloutWarnf("api: rollout: %s\n", n.Message)
 	}
-	cs.beadStores = cs.buildStores(cfg)
 	// Capture the initial raw config snapshot so provenance reads before the
 	// first reload still use the gate's basis. nil is tolerated: RawConfig
 	// lazily retries on the first read.
 	cs.rawCfg = cs.loadRawSnapshot()
-	// Open city-level store for session beads and mail (best-effort).
-	if opened, err := newControllerStateOpenCityStore(cityPath, cs.rolloutFlags.BeadsConditionalWrites()); err != nil {
-		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
-	} else {
-		store := opened.Store
-		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
+	// Open the city store first. A schema-skew fallback is diagnostic-only:
+	// do not start cache reconcilers, rig stores, mail, or external messaging.
+	opened, cityStoreErr := newControllerStateOpenCityStore(cityPath, cs.rolloutFlags.BeadsConditionalWrites())
+	schemaSkewed := beads.IsSchemaSkewDiagnostic(opened.Diagnostic)
+	if schemaSkewed {
+		cs.cityBeadStore = opened.Store
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
-		cs.cityMailProv = newCityMailProvider(cs.cityBeadStore, cfg, cityPath, ep)
-		svc := extmsg.NewServices(cs.cityBeadStore)
-		cs.extmsgSvc = &svc
+		if cityStoreErr != nil {
+			fmt.Fprintf(os.Stderr, "api: city bead store schema mismatch; fallback unavailable: %v (session/mail endpoints disabled)\n", cityStoreErr)
+		}
+	} else {
+		if cityStoreErr != nil {
+			fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", cityStoreErr)
+		}
+		cs.beadStores = cs.buildStores(cfg)
+		if cityStoreErr == nil {
+			cs.cityBeadStore = wrapWithCachingStore(ctx, opened.Store, ep, true)
+			cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
+			cs.cityMailProv = newCityMailProvider(cs.cityBeadStore, cfg, cityPath, ep)
+			svc := extmsg.NewServices(cs.cityBeadStore)
+			cs.extmsgSvc = &svc
+		}
 	}
 	cs.preflightConditionalWrites()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
@@ -700,13 +715,15 @@ func beadEventID(evt events.Event) string {
 func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.updateMu.Lock()
 	defer cs.updateMu.Unlock()
+	cs.updateLocked(cfg, sp)
+}
 
+// updateLocked rebuilds and publishes controller state while updateMu is held.
+func (cs *controllerState) updateLocked(cfg *config.City, sp runtime.Provider) {
 	// The beads CAS gate is boot-latched: a reload that would change it only
 	// records a pending-restart notice, it does not flip the process mid-run.
 	cs.noteRolloutDrift(cfg)
 
-	// Build new stores outside the lock (may do file I/O / subprocess spawns).
-	stores := cs.buildStores(cfg)
 	storeSignature := storeMetadataSignature(cs.cityPath, cfg)
 	// Capture the raw config from the same on-disk generation as cfg, outside
 	// the lock (it does a TOML parse). nil signals "keep the prior snapshot".
@@ -722,6 +739,18 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store reload: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
+	if beads.IsSchemaSkewDiagnostic(openedCityStore.Diagnostic) {
+		if openedCityStore.Store != nil {
+			closeBeadStoreHandle(openedCityStore.Store) //nolint:errcheck
+		}
+		cs.mu.Lock()
+		cs.cityBeadsDiagnostic = diagnosticPtr(openedCityStore.Diagnostic)
+		cs.mu.Unlock()
+		return
+	}
+	// Build rig stores only after the publishing city-store open passes the
+	// schema gate; otherwise their cache loops would reconcile degraded state.
+	stores := cs.buildStores(cfg)
 	cityStore := openedCityStore.Store
 	cityBeadsDiagnostic := diagnosticPtr(openedCityStore.Diagnostic)
 	var cityMailProv mail.Provider
@@ -1463,6 +1492,33 @@ func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	}
 	diag := *cs.cityBeadsDiagnostic
 	return &diag
+}
+
+// preflightCityStoreReload opens and closes the candidate city store without
+// publishing it. Schema-skew diagnostics are latched so the runtime can enter
+// fail-closed preserve mode before any reload mutation stops sessions.
+func (cs *controllerState) preflightCityStoreReload() (*beads.BeadsDiagnostic, error) {
+	cs.mu.RLock()
+	cfg := cs.cfg
+	cs.mu.RUnlock()
+	opened, err := controllerStatePreflightCityStore(cs.cityPath, cfg, cs.rolloutFlags.BeadsConditionalWrites())
+	diag := opened.Diagnostic
+	if beads.IsSchemaSkewDiagnostic(diag) {
+		if opened.Store != nil {
+			defer closeBeadStoreHandle(opened.Store) //nolint:errcheck
+		}
+		cs.mu.Lock()
+		cs.cityBeadsDiagnostic = diagnosticPtr(diag)
+		cs.mu.Unlock()
+		return &diag, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if opened.Store != nil {
+		defer closeBeadStoreHandle(opened.Store) //nolint:errcheck
+	}
+	return &diag, nil
 }
 
 // Orders scans formula layers and returns active orders.
@@ -2556,6 +2612,8 @@ func (s *configMutationSnapshot) restore() error {
 }
 
 func (cs *controllerState) mutateAndPoke(mutate func() error) error {
+	cs.updateMu.Lock()
+	defer cs.updateMu.Unlock()
 	var snapshot *configMutationSnapshot
 	if cs.cityPath != "" {
 		var err error
@@ -2601,7 +2659,7 @@ func (cs *controllerState) refreshConfigSnapshot() (string, error) {
 	cs.mu.RLock()
 	sp := cs.sp
 	cs.mu.RUnlock()
-	cs.update(nextCfg, sp)
+	cs.updateLocked(nextCfg, sp)
 	return revision, nil
 }
 

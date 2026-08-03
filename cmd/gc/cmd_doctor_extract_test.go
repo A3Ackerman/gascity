@@ -89,6 +89,21 @@ func TestBuildDoctorChecksSkipsNamedAlwaysMinConflictCheckWithoutConfig(t *testi
 	}
 }
 
+func TestBuildDoctorChecksKeepsBeadsStoreCheckOnExpandedConfigError(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	names := doctorCheckNames(buildDoctorChecks(cityDir, nil, os.ErrInvalid, buildDoctorChecksOpts{
+		ControllerRunning:    true,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+	}))
+	if got := doctorCheckIndex(names, "beads-store"); got < 0 {
+		t.Fatalf("beads-store check missing after expanded config error: %v", names)
+	}
+}
+
 func doctorCheckNames(checks []doctor.Check) []string {
 	names := make([]string, 0, len(checks))
 	for _, check := range checks {
