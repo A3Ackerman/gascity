@@ -95,10 +95,13 @@ inventory them (`gc session list`) and cycle each deliberately
 (`tmux -L gastown kill-session -t <sess>` → supervisor respawns on the new
 binary); until then the town intentionally runs mixed versions — roll back
 by restoring the `gc.bak-*` binary if the mix misbehaves.
-Verify: `gc doctor`, a by-ID bead read, and grep the binary for a string
-distinctive to the change you shipped. Push `carry/operational` to
-`origin` after every deploy so the deployed lineage always has an off-box
-backup.
+Verify the full effective configuration loads cleanly before trusting narrower
+commands: run `gc config show >/dev/null`, then `gc doctor`, a by-ID `gc bd show <id>`,
+and `gc status`. The config check catches transient pack-lock/cache skew after
+an import or binary transition; any failure triggers rollback rather than a
+retrying mixed-version window. Finally, grep the binary for a string distinctive
+to the change and push `carry/operational` to `origin` so the deployed lineage
+has an off-box backup.
 
 ## Rebase cadence
 
