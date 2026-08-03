@@ -2000,6 +2000,10 @@ func sameManagedDoltHost(left, right string) bool {
 	return normalize(left) == normalize(right)
 }
 
+func sameManagedDoltServer(city, target contract.DoltConnectionTarget) bool {
+	return !city.External && sameManagedDoltHost(city.Host, target.Host) && city.Port == target.Port
+}
+
 func managedLocalDoltScanTargetsForScopeRoots(cityPath string, scopeRoots []string) ([]doltDataScanTarget, bool) {
 	dataDir := resolveManagedDoltDataDir(cityPath)
 	seenRoots := map[string]struct{}{}
@@ -2034,7 +2038,7 @@ func managedLocalDoltScanTargetsForScopeRoots(cityPath string, scopeRoots []stri
 				// city. ResolveDoltConnectionTarget calls that shape "external" even
 				// though its database lives under the city's managed data directory.
 				cityTarget, cityErr := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, cityPath)
-				if cityErr == nil && sameManagedDoltHost(target.Host, cityTarget.Host) && target.Port == cityTarget.Port {
+				if cityErr == nil && sameManagedDoltServer(cityTarget, target) {
 					rememberDirectDatabase(scopeRoot)
 				}
 				continue

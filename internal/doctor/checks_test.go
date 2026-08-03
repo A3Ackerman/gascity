@@ -4121,3 +4121,15 @@ func TestDoltVersionCheck_CanFixFalse(t *testing.T) {
 		t.Error("CanFix() = true, want false")
 	}
 }
+
+func TestSameManagedDoltServerRejectsExternalCityEndpoint(t *testing.T) {
+	city := contract.DoltConnectionTarget{Host: "127.0.0.1", Port: "51361", External: true}
+	rig := contract.DoltConnectionTarget{Host: "localhost", Port: "51361", External: true}
+	if sameManagedDoltServer(city, rig) {
+		t.Fatal("external city endpoint must not classify a rig database as managed-local")
+	}
+	city.External = false
+	if !sameManagedDoltServer(city, rig) {
+		t.Fatal("managed city endpoint should match localhost alias at the same port")
+	}
+}
