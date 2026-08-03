@@ -257,26 +257,6 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 
 	ensureManagedDoltPublishedForRuntime(p.CityPath, p.Stderr, logPrefix, managedDoltHealth, managedDoltOwned, managedDoltPort)
 
-	// Sweep orphaned order-tracking beads on startup only (not config reload).
-	// A previous controller instance may have left tracking beads open
-	// (goroutines killed on restart, or silent Close failures).
-	// Retry with backoff as defense-in-depth against transient store
-	// errors immediately after ensureBeadsProvider returns (#753).
-	func() {
-		sweepStore, err := newCityRuntimeOpenSweepStore(p.CityPath, p.CityPath)
-		if err != nil {
-			fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
-			return
-		}
-		defer closeBeadStoreHandle(sweepStore) //nolint:errcheck
-		if n, err := sweepOrphanedOrderTrackingRetryLimit(sweepStore, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
-			fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
-		} else if n > 0 {
-			fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
-		}
-		warnIfClosedOrderTrackingBacklogLarge(sweepStore, p.Stderr)
-	}()
-
 	od, orderSnapshot := buildOrderDispatcherWithSnapshot(p.CityPath, p.Cfg, p.Rec, p.Stderr, "gc start: order scan")
 
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
@@ -342,10 +322,24 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		stderr:            p.Stderr,
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
-	if err := cr.svc.Reload(); err != nil {
-		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-	}
 	return cr
+}
+
+// sweepOrphanedOrderTracking closes tracking beads left by a prior controller.
+// It runs only after the controller store passes the schema compatibility gate.
+func (cr *CityRuntime) sweepOrphanedOrderTracking() {
+	sweepStore, err := newCityRuntimeOpenSweepStore(cr.cityPath, cr.cityPath)
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: order tracking sweep: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	defer closeBeadStoreHandle(sweepStore) //nolint:errcheck
+	if n, err := sweepOrphanedOrderTrackingRetryLimit(sweepStore, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: order tracking sweep (closed %d): %v\n", cr.logPrefix, n, err) //nolint:errcheck // best-effort stderr
+	} else if n > 0 {
+		fmt.Fprintf(cr.stderr, "%s: closed %d orphaned order-tracking beads\n", cr.logPrefix, n) //nolint:errcheck
+	}
+	warnIfClosedOrderTrackingBacklogLarge(sweepStore, cr.stderr)
 }
 
 // setControllerState sets the API state for this city. The controller
@@ -360,11 +354,54 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 	return cr.ct
 }
 
+// controllerStoreSchemaSkewDiagnostic returns the blocking native-store
+// diagnostic, if any, from the controller's latest city-store open.
+func (cr *CityRuntime) controllerStoreSchemaSkewDiagnostic() *beads.BeadsDiagnostic {
+	if cr.cs == nil {
+		return nil
+	}
+	diag := cr.cs.CityBeadsDiagnostic()
+	if diag == nil || !beads.IsSchemaSkewDiagnostic(*diag) {
+		return nil
+	}
+	return diag
+}
+
+// holdForControllerStoreSchemaSkew blocks until shutdown when the controller
+// store is newer than this binary. The preserve latch protects every outer
+// lifecycle owner that may call shutdown after run returns.
+func (cr *CityRuntime) holdForControllerStoreSchemaSkew(ctx context.Context) bool {
+	diag := cr.controllerStoreSchemaSkewDiagnostic()
+	if diag == nil {
+		return false
+	}
+	cr.preserveSessionsOnShutdown()
+	stderr := cr.stderr
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	fmt.Fprintf(stderr, "%s: CRITICAL: %s; session reconciliation held fail-closed until a schema-compatible gc binary is installed\n", cr.logPrefix, diag.PreflightReason) //nolint:errcheck // best-effort alarm
+	if ctx != nil {
+		<-ctx.Done()
+	}
+	return true
+}
+
 // run executes the reconciliation loop until ctx is canceled. This is
 // the per-city main loop — it watches config, reconciles agents, runs
 // wisp GC, and dispatches orders.
+
 func (cr *CityRuntime) run(ctx context.Context) {
+	if cr.holdForControllerStoreSchemaSkew(ctx) {
+		return
+	}
 	defer cr.shutdown()
+	cr.sweepOrphanedOrderTracking()
+	if cr.svc != nil {
+		if err := cr.svc.Reload(); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+	}
 
 	dirty := cr.configDirty
 	if dirty == nil {
@@ -1001,7 +1038,6 @@ func (cr *CityRuntime) tick(
 			trace.end(completion, traceRecordPayload{"phase": "tick", "trigger": traceTrigger})
 		}
 	}()
-	cr.reconcilePoolDeaths(prevPoolRunning)
 
 	var manualReload *reloadRequest
 	var manualReply reloadControlReply
@@ -1067,6 +1103,10 @@ func (cr *CityRuntime) tick(
 	if ctx.Err() != nil {
 		return
 	}
+	if cr.holdForControllerStoreSchemaSkew(ctx) {
+		return
+	}
+	cr.reconcilePoolDeaths(prevPoolRunning)
 
 	if !configChanged && cr.shouldSkipTickForFSPressure(trace, trigger) {
 		cr.processConvergenceRequests(ctx)
@@ -1767,6 +1807,21 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if configName == "" {
 		configName = cr.cityName
 	}
+	if cr.cs != nil {
+		diag, preflightErr := cr.cs.preflightCityStoreReload()
+		if preflightErr != nil {
+			err := fmt.Errorf("config reload: preflight city bead store: %w", preflightErr)
+			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
+			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Warnings: warnings}
+		}
+		if diag != nil && beads.IsSchemaSkewDiagnostic(*diag) {
+			cr.preserveSessionsOnShutdown()
+			err := fmt.Errorf("config reload blocked by native store schema mismatch: %s", diag.PreflightReason)
+			fmt.Fprintf(cr.stderr, "%s: %v; preserving sessions\n", cr.logPrefix, err) //nolint:errcheck
+			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
+			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Warnings: warnings}
+		}
+	}
 	result, err := tryReloadConfig(cr.tomlPath, configName, cityRoot)
 	if err != nil {
 		if result != nil {
@@ -1939,8 +1994,10 @@ func (cr *CityRuntime) reloadConfigTraced(
 		appendWarning(fmt.Sprintf("config reload: pruning legacy %s scripts: %v", scope, err))
 	})
 
+	var providerSwapRunning []string
 	if providerChanged {
-		running, lErr := cr.sp.ListRunning("")
+		var lErr error
+		providerSwapRunning, lErr = cr.sp.ListRunning("")
 		if lErr != nil {
 			err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)
 			if runtime.IsPartialListError(lErr) {
@@ -1951,26 +2008,35 @@ func (cr *CityRuntime) reloadConfigTraced(
 			if trace != nil {
 				trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
 			}
-			return reloadControlReply{
-				Outcome:  reloadOutcomeFailed,
-				Error:    err.Error(),
-				Warnings: warnings,
-			}
+			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Warnings: warnings}
 		}
+	}
+
+	// Publish through the canonical revision-aware path immediately before any
+	// provider stop. Its publishing store open is the authoritative schema gate.
+	if cr.cs != nil {
+		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
+		if cr.cs.Config() != nextCfg {
+			err := errors.New("config reload superseded by a concurrent config mutation")
+			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Revision: result.Revision, Warnings: warnings}
+		}
+		if diag := cr.controllerStoreSchemaSkewDiagnostic(); diag != nil {
+			cr.preserveSessionsOnShutdown()
+			err := fmt.Errorf("config reload blocked by native store schema mismatch: %s", diag.PreflightReason)
+			telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Revision: result.Revision, Warnings: warnings}
+		}
+	}
+	if providerChanged {
 		providerSwapSummary := fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
 		if pendingProviderName == *lastProviderName {
 			providerSwapSummary = fmt.Sprintf("%s runtime declaration changed", displayProviderName(pendingProviderName))
 		}
-		if len(running) > 0 {
-			fmt.Fprintf(cr.stdout, "Provider changed (%s), stopping %d agent(s)...\n", //nolint:errcheck
-				providerSwapSummary, len(running))
-			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.sessionsBeadStore(), cr.stdout, cr.stderr)
+		if len(providerSwapRunning) > 0 {
+			fmt.Fprintf(cr.stdout, "Provider changed (%s), stopping %d agent(s)...\n", providerSwapSummary, len(providerSwapRunning)) //nolint:errcheck
+			gracefulStopAll(providerSwapRunning, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.sessionsBeadStore(), cr.stdout, cr.stderr)
 		}
-		cr.rec.Record(events.Event{
-			Type:    events.ProviderSwapped,
-			Actor:   "gc",
-			Message: providerSwapSummary,
-		})
+		cr.rec.Record(events.Event{Type: events.ProviderSwapped, Actor: "gc", Message: providerSwapSummary})
 		fmt.Fprintf(cr.stdout, "Session provider swapped to %s.\n", displayProviderName(pendingProviderName)) //nolint:errcheck
 		*lastProviderName = pendingProviderName
 	}
@@ -2039,10 +2105,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.dops = nextDops
 	cr.serviceStateMu.Unlock()
 	cr.demandSnapshot = nil
-
-	if cr.cs != nil {
-		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
-	}
 	if cr.svc != nil {
 		if err := cr.svc.Reload(); err != nil {
 			appendWarning(fmt.Sprintf("service reload: %v", err))

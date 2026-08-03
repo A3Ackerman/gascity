@@ -1401,17 +1401,21 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 // with the city config supplied by a caller that already loaded it. A nil
 // config is loaded here, which is what every caller outside the bd scope
 // resolution path passes.
-func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
+func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode bool, authoritative bool) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithConfigOptions(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, true)
+}
+
+func openStoreResultAtForCityWithConfigOptions(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, ensureAssets bool) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
 	if cfg == nil {
 		cfg, _ = loadCityConfig(runtimeCityPath, io.Discard)
-	} else {
-		// Loading the config would have run the builtin-cache readiness pass.
-		// Reusing one must not skip that self-heal for a city this process has
-		// never readied.
+	} else if ensureAssets {
+		// Reusing a loaded config normally performs builtin-cache self-heal. The
+		// reload schema preflight disables it so the safety probe cannot mutate
+		// pack artifacts before deciding whether reconciliation must be held.
 		_ = ensureBuiltinRuntimeAssetsForSuppliedConfig(runtimeCityPath, io.Discard)
 	}
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
@@ -1484,7 +1488,7 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 		},
 	})
 	if err != nil {
-		return beads.StoreOpenResult{}, err
+		return result, err
 	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
