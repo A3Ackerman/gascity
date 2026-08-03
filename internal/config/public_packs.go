@@ -41,7 +41,7 @@ const (
 	// fork, not a gastownhall/gascity commit — the fork IS the distribution
 	// for this machine's cities, and the binary serves the pinned content from
 	// its embedded FS. Carries the final Dolt mirror freshness/health semantics.
-	BundledPackImportVersion = "sha:abcf2b639b85f849391ef0daf9ddcd27b0728f0a"
+	BundledPackImportVersion = "sha:abcf2b6393a1e52378656570028ac6deb3d2f10f"
 )
 
 // SupersededBundledPackImportVersions lists previous canonical pins for the
