@@ -206,7 +206,10 @@
               "logout",
               "whoami",
               "runtime-heartbeat",
-              "pack-registry-requests"
+              "pack-registry-requests",
+              "session-resume",
+              "worktree-gc",
+              "session-history"
             ]
           },
           "event_id": {

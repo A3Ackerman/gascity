@@ -8005,6 +8005,7 @@ func TestDoPrimeStrictMissingFragmentFails(t *testing.T) {
 	t.Setenv("GC_RIG", "")
 
 	dir := t.TempDir()
+	t.Setenv("GC_CITY", dir)
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -8061,6 +8062,7 @@ func TestDoPrimeStrictRawFragmentResolves(t *testing.T) {
 	t.Setenv("GC_RIG", "")
 
 	dir := t.TempDir()
+	t.Setenv("GC_CITY", dir)
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -8113,6 +8115,7 @@ func TestDoPrimeStrictUnknownTemplateVariableFails(t *testing.T) {
 	t.Setenv("GC_RIG", "")
 
 	dir := t.TempDir()
+	t.Setenv("GC_CITY", dir)
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
