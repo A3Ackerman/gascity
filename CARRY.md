@@ -80,7 +80,7 @@ the supervisor holds the binary open, so never `cp` over it:
 
 ```sh
 set -e
-/tmp/gc-new --city ~/gascity doctor
+/tmp/gc-new --city ~/gascity doctor --check-timeout 5m
 cp /tmp/gc-new ~/go/bin/gc.staged
 cp ~/go/bin/gc ~/go/bin/gc.bak-$(date +%Y%m%d-%H%M)
 mv ~/go/bin/gc.staged ~/go/bin/gc        # single atomic replacement; ~/.local/bin/gc symlinks here

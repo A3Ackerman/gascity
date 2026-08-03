@@ -18,7 +18,7 @@ import (
 const (
 	orderFiringCurrentName    = "order-firing-current"
 	orderFiringInspectHintFmt = "Inspect with: gc order check && gc order history %s"
-	orderFiringHistoryTimeout = 15 * time.Second
+	orderFiringHistoryTimeout = 4 * time.Minute
 )
 
 // OrderFiringCurrentLastRunFunc reports the newest persisted run time for an order.
