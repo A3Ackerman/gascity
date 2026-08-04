@@ -78,6 +78,19 @@ func TestBuiltinProviderMimoCodeSpec(t *testing.T) {
 	}
 }
 
+func TestBuiltinProviderOMPAutoSubmitsStartupPrompt(t *testing.T) {
+	spec, ok := BuiltinProviders()["omp"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing omp")
+	}
+	if spec.PromptMode != "arg" {
+		t.Fatalf("omp PromptMode = %q, want arg so the startup prompt is submitted as a positional CLI argument", spec.PromptMode)
+	}
+	if len(spec.Args) != 2 || spec.Args[0] != "--hook" || spec.Args[1] != ".omp/hooks/gc-hook.ts" {
+		t.Fatalf("omp Args = %v, want managed hook arguments", spec.Args)
+	}
+}
+
 func TestBuiltinProvidersReturnClonedData(t *testing.T) {
 	a := BuiltinProviders()
 	b := BuiltinProviders()
