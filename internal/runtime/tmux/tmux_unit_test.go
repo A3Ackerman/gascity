@@ -6,6 +6,32 @@ import (
 	"time"
 )
 
+func TestProviderPeekTargetsAgentPaneAcrossWindows(t *testing.T) {
+	exec := &fakeExecutor{outs: []string{
+		"%1\tzsh\t999999999\n%2\tclaude\t888888888",
+		"GT_PROCESS_NAMES=claude",
+		"agent pane output",
+	}}
+	tm := NewTmux()
+	tm.exec = exec
+	provider := &Provider{tm: tm}
+
+	output, err := provider.Peek("worker", 50)
+	if err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	if output != "agent pane output" {
+		t.Fatalf("Peek output = %q, want agent pane output", output)
+	}
+	if len(exec.calls) != 3 {
+		t.Fatalf("tmux calls = %v, want list-panes, show-environment, capture-pane", exec.calls)
+	}
+	capture := exec.calls[2]
+	if !slices.Contains(capture, "capture-pane") || !slices.Contains(capture, "%2") {
+		t.Fatalf("capture call = %v, want agent pane target %%2", capture)
+	}
+}
+
 func TestProviderEnvSkipsEscapeForPiAlias(t *testing.T) {
 	if !providerEnvSkipsEscape("my-pi/tmux") {
 		t.Fatal("pi provider alias should skip pre-enter Escape")

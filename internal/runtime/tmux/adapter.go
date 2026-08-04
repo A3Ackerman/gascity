@@ -613,13 +613,19 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return p.tm.RemoveEnvironment(name, key)
 }
 
-// Peek captures the last N lines of output from the named session.
-// If lines <= 0, captures all available scrollback.
+// Peek captures the last N lines of output from the named session's agent pane.
+// In a multi-window session, the focused window may be an unrelated shell; use
+// the same process-aware pane resolution as nudge delivery and fall back to the
+// session target only when no agent pane can be identified.
 func (p *Provider) Peek(name string, lines int) (string, error) {
-	if lines <= 0 {
-		return p.tm.CapturePaneAll(name)
+	target := name
+	if agentPane, err := p.tm.FindAgentPane(name); err == nil && agentPane != "" {
+		target = agentPane
 	}
-	return p.tm.CapturePane(name, lines)
+	if lines <= 0 {
+		return p.tm.CapturePaneAll(target)
+	}
+	return p.tm.CapturePane(target, lines)
 }
 
 // ListRunning returns all tmux session names matching the given prefix.
