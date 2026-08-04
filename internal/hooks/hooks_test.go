@@ -1247,17 +1247,21 @@ func TestInstallClaudeIdempotent(t *testing.T) {
 
 func TestInstallClaudeMergesCityDotClaudeSettings(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Files["/city/.claude/settings.json"] = []byte(`{
+	const trackedSettings = `{
   "custom": true,
   "mcpServers": {
     "notes": {
       "command": "notes-mcp"
     }
   }
-}`)
+}`
+	fs.Files["/city/.claude/settings.json"] = []byte(trackedSettings)
 
 	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
 		t.Fatalf("Install: %v", err)
+	}
+	if got := string(fs.Files["/city/.claude/settings.json"]); got != trackedSettings {
+		t.Fatalf("Install modified tracked .claude/settings.json:\nwant:\n%s\n\ngot:\n%s", trackedSettings, got)
 	}
 
 	data := string(fs.Files["/city/.gc/settings.json"])
