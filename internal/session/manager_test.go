@@ -4590,6 +4590,9 @@ func TestKill_ActiveState(t *testing.T) {
 	if err := mgr.Kill(info.ID); err != nil {
 		t.Fatalf("Kill active session: %v", err)
 	}
+	if sp.IsRunning(info.SessionName) {
+		t.Error("runtime session should be stopped after kill")
+	}
 }
 
 func TestKill_AwakeState(t *testing.T) {
