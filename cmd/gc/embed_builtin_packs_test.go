@@ -384,6 +384,7 @@ func TestBundledOmpHookPublishesProviderSessionID(t *testing.T) {
 		`"session.created"`,
 		`"session.compacted"`,
 		`"experimental.chat.system.transform"`,
+		`run(["hook"`,
 	} {
 		if strings.Contains(data, legacy) {
 			t.Errorf("bundled OMP hook still contains legacy API marker %q:\n%s", legacy, data)
