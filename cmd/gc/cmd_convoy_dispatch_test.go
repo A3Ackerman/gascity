@@ -184,7 +184,7 @@ func TestCollectSourceWorkflowMatchesSkipsNonSourceListFailure(t *testing.T) {
 		{path: filepath.Join(cityPath, "rigs/healthy"), store: healthyStore},
 	}
 
-	matches, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, nil)
+	matches, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, nil, false)
 	if err != nil {
 		t.Fatalf("collectSourceWorkflowMatchesFromStores: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestCollectSourceWorkflowMatchesSurfacesDescendantScanFailure(t *testing.T)
 		{path: filepath.Join(cityPath, "rigs/stale"), store: sourceWorkflowDescendantScanFailStore{Store: staleBacking, err: descendantErr}},
 	}
 
-	matches, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, nil)
+	matches, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, nil, false)
 	if err != nil {
 		t.Fatalf("collectSourceWorkflowMatchesFromStores: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestCollectSourceWorkflowMatchesKeepsSelectedStoreListFailureStrict(t *test
 		{path: filepath.Join(cityPath, "rigs/healthy"), store: beads.NewMemStore()},
 	}
 
-	_, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, nil)
+	_, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, nil, false)
 	if !errors.Is(err, selectedErr) {
 		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want selected store error %v", err, selectedErr)
 	}
@@ -268,7 +268,7 @@ func TestCollectSourceWorkflowMatchesFailsWhenSelectedStoreIsMissing(t *testing.
 	selectedErr := errors.New("selected store reopen failed")
 	skips := []sourceWorkflowStoreSkip{{path: cityPath, err: selectedErr}}
 
-	_, _, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, skips)
+	_, _, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "city:test", stores, skips, false)
 	if err == nil || !strings.Contains(err.Error(), "city:test") {
 		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want missing selected-store failure", err)
 	}
@@ -312,7 +312,7 @@ func TestCollectSourceWorkflowMatchesFailsWhenNoStoreCanBeScanned(t *testing.T) 
 		{path: filepath.Join(cityPath, "rigs/stale-b"), store: sourceWorkflowScanFailStore{Store: beads.NewMemStore(), err: errors.New("second store failed")}},
 	}
 
-	_, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "", stores, nil)
+	_, skips, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, "mc-source", "", stores, nil, false)
 	if !errors.Is(err, firstErr) {
 		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want first scan error %v", err, firstErr)
 	}
@@ -329,6 +329,7 @@ func TestCollectSourceWorkflowMatchesFailsWhenNoStoreIsAvailable(t *testing.T) {
 		"",
 		[]convoyStoreView{{path: "/city/rigs/nil"}},
 		nil,
+		false,
 	)
 	if err == nil || !strings.Contains(err.Error(), "no source workflow stores") {
 		t.Fatalf("collectSourceWorkflowMatchesFromStores error = %v, want no-usable-store failure", err)
@@ -1069,6 +1070,77 @@ func TestCmdWorkflowDeleteSourceClosesMatchedRootsAndClearsWorkflowID(t *testing
 	}
 	if updatedChild.Status != "closed" {
 		t.Fatalf("child status = %q, want closed", updatedChild.Status)
+	}
+}
+
+func TestCmdWorkflowDeleteSourceClosesOrphanedDescendantsUnderClosedRoot(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "Source", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	root, err := store.Create(beads.Bead{
+		Title:  "Closed workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   source.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:  "Orphaned step",
+		Type:   "step",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	if err := store.Close(root.ID); err != nil {
+		t.Fatalf("Close(root): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "workflow_id", root.ID); err != nil {
+		t.Fatalf("SetMetadata(workflow_id): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowDeleteSource returned %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=cleaned") {
+		t.Fatalf("stdout = %q, want cleaned result", stdout.String())
+	}
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	updatedChild, err := reloaded.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get(child): %v", err)
+	}
+	if updatedChild.Status != "closed" {
+		t.Fatalf("orphaned child status = %q, want closed", updatedChild.Status)
 	}
 }
 

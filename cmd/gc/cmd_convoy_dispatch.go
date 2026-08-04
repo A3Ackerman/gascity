@@ -1192,7 +1192,7 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		if err != nil {
 			return err
 		}
-		matches, skips, err := collectSourceWorkflowMatches(cfg, cityPath, sourceBeadID, target.storeRef)
+		matches, skips, err := collectSourceWorkflowMatches(cfg, cityPath, sourceBeadID, target.storeRef, true)
 		if err != nil {
 			return err
 		}
@@ -1336,7 +1336,7 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		if target.storeView.store == nil || strings.TrimSpace(target.sourceBead.ID) == "" {
 			return fmt.Errorf("getting bead %q: %w", sourceBeadID, beads.ErrNotFound)
 		}
-		matches, skips, err := collectSourceWorkflowMatches(cfg, cityPath, sourceBeadID, target.storeRef)
+		matches, skips, err := collectSourceWorkflowMatches(cfg, cityPath, sourceBeadID, target.storeRef, false)
 		if err != nil {
 			return err
 		}
@@ -1525,28 +1525,29 @@ func restoreWorkflowDeleteDeps(store beads.Store, downDeps, upDeps []beads.Dep) 
 	return restoreErr
 }
 
-func collectSourceWorkflowMatches(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string) ([]sourceWorkflowStoreMatch, []sourceWorkflowStoreSkip, error) {
+func collectSourceWorkflowMatches(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string, includeOrphanedRoots bool) ([]sourceWorkflowStoreMatch, []sourceWorkflowStoreSkip, error) {
 	stores, skips, err := openSourceWorkflowStores(cfg, cityPath, sourceBeadID)
 	if err != nil {
 		return nil, skips, err
 	}
-	return collectSourceWorkflowMatchesFromStores(cfg, cityPath, sourceBeadID, sourceStoreRef, stores, skips)
+	return collectSourceWorkflowMatchesFromStores(cfg, cityPath, sourceBeadID, sourceStoreRef, stores, skips, includeOrphanedRoots)
 }
 
-func collectSourceWorkflowMatchesFromStores(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string, stores []convoyStoreView, skips []sourceWorkflowStoreSkip) ([]sourceWorkflowStoreMatch, []sourceWorkflowStoreSkip, error) {
+func collectSourceWorkflowMatchesFromStores(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string, stores []convoyStoreView, skips []sourceWorkflowStoreSkip, includeOrphanedRoots bool) ([]sourceWorkflowStoreMatch, []sourceWorkflowStoreSkip, error) {
 	cityName := loadedCityName(cfg, cityPath)
 	if err := ensureSelectedSourceStorePresent(cfg, cityPath, cityName, sourceStoreRef, stores, skips); err != nil {
 		return nil, skips, err
 	}
 	c := &sourceWorkflowMatchCollector{
-		cfg:            cfg,
-		cityPath:       cityPath,
-		cityName:       cityName,
-		stores:         stores,
-		skips:          skips,
-		matchesByLabel: map[string]sourceWorkflowStoreMatch{},
-		visited:        map[string]struct{}{},
-		failedStores:   map[int]struct{}{},
+		cfg:                  cfg,
+		cityPath:             cityPath,
+		cityName:             cityName,
+		stores:               stores,
+		skips:                skips,
+		includeOrphanedRoots: includeOrphanedRoots,
+		matchesByLabel:       map[string]sourceWorkflowStoreMatch{},
+		visited:              map[string]struct{}{},
+		failedStores:         map[int]struct{}{},
 	}
 	if err := c.collect(sourceBeadID, sourceStoreRef); err != nil {
 		return nil, c.skips, err
@@ -1596,12 +1597,13 @@ type sourceWorkflowMatchCollector struct {
 	cityName string
 	stores   []convoyStoreView
 
-	matchesByLabel  map[string]sourceWorkflowStoreMatch
-	visited         map[string]struct{}
-	failedStores    map[int]struct{}
-	skips           []sourceWorkflowStoreSkip
-	anyStoreScanned bool
-	firstScanErr    error
+	includeOrphanedRoots bool
+	matchesByLabel       map[string]sourceWorkflowStoreMatch
+	visited              map[string]struct{}
+	failedStores         map[int]struct{}
+	skips                []sourceWorkflowStoreSkip
+	anyStoreScanned      bool
+	firstScanErr         error
 }
 
 // collect walks every store for currentSourceID, then recurses into each child
@@ -1650,9 +1652,15 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 	}
 	c.visited[visitKey] = struct{}{}
 
-	roots, err := sourceworkflow.ListLiveRoots(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+	rootLister := sourceworkflow.ListLiveRoots
+	operation := "listing live source workflows"
+	if c.includeOrphanedRoots {
+		rootLister = sourceworkflow.ListRecoverableRoots
+		operation = "listing recoverable source workflows"
+	}
+	roots, err := rootLister(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
 	if err != nil {
-		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
+		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, operation, err)
 	}
 	if err := c.mergeRootMatches(info, roots); err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)

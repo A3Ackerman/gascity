@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -310,6 +311,72 @@ func TestListLiveRootsTreatsLegacyRootAsStoreScoped(t *testing.T) {
 	}
 	if len(betaRoots) != 0 {
 		t.Fatalf("ListLiveRoots(beta) = %#v, want 0 roots", betaRoots)
+	}
+}
+
+func TestListRecoverableRootsIncludesClosedRootsOnlyWhileDescendantsRemainOpen(t *testing.T) {
+	store := beads.NewMemStore()
+	createRoot := func(id string) beads.Bead {
+		t.Helper()
+		root, err := store.Create(beads.Bead{
+			ID:     id,
+			Title:  id,
+			Type:   "task",
+			Status: "in_progress",
+			Metadata: map[string]string{
+				"gc.kind":           "workflow",
+				"gc.source_bead_id": "BL-42",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", id, err)
+		}
+		return root
+	}
+
+	live := createRoot("wf-live")
+	orphaned := createRoot("wf-orphaned")
+	orphanedStep, err := store.Create(beads.Bead{
+		ID:       "step-orphaned",
+		Title:    "open step",
+		Type:     "step",
+		Status:   "open",
+		Metadata: map[string]string{"gc.root_bead_id": orphaned.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create(orphaned step): %v", err)
+	}
+	terminal := createRoot("wf-terminal")
+	terminalStep, err := store.Create(beads.Bead{
+		ID:       "step-terminal",
+		Title:    "closed step",
+		Type:     "step",
+		Status:   "open",
+		Metadata: map[string]string{"gc.root_bead_id": terminal.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create(terminal step): %v", err)
+	}
+	for _, id := range []string{orphaned.ID, terminalStep.ID, terminal.ID} {
+		if err := store.Close(id); err != nil {
+			t.Fatalf("Close(%s): %v", id, err)
+		}
+	}
+
+	roots, err := ListRecoverableRoots(store, "BL-42", "", "")
+	if err != nil {
+		t.Fatalf("ListRecoverableRoots: %v", err)
+	}
+	gotIDs := make([]string, 0, len(roots))
+	for _, root := range roots {
+		gotIDs = append(gotIDs, root.ID)
+	}
+	wantIDs := []string{live.ID, orphaned.ID}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("recoverable root IDs = %v, want %v", gotIDs, wantIDs)
+	}
+	if orphanedStep.Status != "open" {
+		t.Fatalf("fixture orphaned step status = %q, want open", orphanedStep.Status)
 	}
 }
 

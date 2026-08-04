@@ -171,6 +171,39 @@ func WorkflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootSt
 // indexes on gc.source_bead_id and filters via IsWorkflowRoot so both
 // legacy gc.kind=workflow roots and graph.v2-only roots are visible.
 func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
+	return listRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, false)
+}
+
+// ListRecoverableRoots returns every live workflow root plus any closed root
+// that still owns an open descendant. The latter is an interrupted cleanup:
+// callers may safely pass it to CloseWorkflowSubtree to finish closing the
+// orphaned steps without reprocessing fully terminal workflow history.
+func ListRecoverableRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
+	roots, err := listRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, true)
+	if err != nil {
+		return nil, err
+	}
+	recoverable := roots[:0]
+	for _, root := range roots {
+		if root.Status != "closed" {
+			recoverable = append(recoverable, root)
+			continue
+		}
+		subtree, err := ListWorkflowBeads(store, root.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, bead := range subtree {
+			if bead.ID != root.ID && bead.Status != "closed" {
+				recoverable = append(recoverable, root)
+				break
+			}
+		}
+	}
+	return recoverable, nil
+}
+
+func listRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string, includeClosed bool) ([]beads.Bead, error) {
 	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
 	if store == nil || sourceBeadID == "" {
 		return nil, nil
@@ -179,6 +212,7 @@ func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef
 		Metadata: map[string]string{
 			beadmeta.SourceBeadIDMetadataKey: sourceBeadID,
 		},
+		IncludeClosed: includeClosed,
 	})
 	if err != nil {
 		return nil, err
