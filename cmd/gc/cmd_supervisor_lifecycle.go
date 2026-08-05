@@ -44,7 +44,7 @@ var (
 	supervisorSystemdWarmRefreshStopTimeout  = 5 * time.Second
 	supervisorSystemdWarmRefreshPollInterval = 100 * time.Millisecond
 	supervisorLaunchdRefreshPollInterval     = 100 * time.Millisecond
-	launchdRefreshWaitTimeout                = 5 * time.Second
+	launchdRefreshWaitTimeout                = 30 * time.Second
 	supervisorPlistValidationTimeout         = 2 * time.Second
 	supervisorLaunchdProbeTimeout            = time.Second
 	supervisorLaunchctlTimeout               = 10 * time.Second
