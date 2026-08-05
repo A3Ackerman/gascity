@@ -149,10 +149,35 @@ install: check-self-contained
 	@mkdir -p $(INSTALL_DIR)
 	@set -e; \
 		tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
-		trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
+		backup="$(INSTALL_DIR)/$(BINARY).bak-$$(date +%Y%m%d-%H%M%S)"; \
+		out=$$(mktemp); \
+		trap 'rm -f "$$tmp" "$$out"' EXIT INT TERM HUP; \
 		cp -f "$(BUILD_DIR)/$(BINARY)" "$$tmp"; \
 		chmod 0755 "$$tmp"; \
+		set +e; "$$tmp" version > "$$out" 2>&1; rc=$$?; set -e; \
+		if [ $$rc -ne 0 ] || [ ! -s "$$out" ]; then \
+			echo "FATAL: staged $(BINARY) will not execute (exit=$$rc, output=$$(wc -c < "$$out") bytes)."; \
+			exit 1; \
+		fi; \
+		if [ -e "$(INSTALL_DIR)/$(BINARY)" ]; then cp -p "$(INSTALL_DIR)/$(BINARY)" "$$backup"; fi; \
 		mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"; \
+		: > "$$out"; \
+		set +e; "$(INSTALL_DIR)/$(BINARY)" version > "$$out" 2>&1; rc=$$?; set -e; \
+		if [ $$rc -ne 0 ] || [ ! -s "$$out" ]; then \
+			echo "FATAL: installed $(INSTALL_DIR)/$(BINARY) will not execute (exit=$$rc, output=$$(wc -c < "$$out") bytes)."; \
+			echo "       Exit 137 with no output means macOS SIGKILLed it for an invalid"; \
+			echo "       code signature. Restoring the previous binary by atomic rename."; \
+			if [ -e "$$backup" ]; then \
+				mv -f "$$backup" "$(INSTALL_DIR)/$(BINARY)"; \
+				: > "$$out"; \
+				set +e; "$(INSTALL_DIR)/$(BINARY)" version > "$$out" 2>&1; rollback_rc=$$?; set -e; \
+				if [ $$rollback_rc -ne 0 ] || [ ! -s "$$out" ]; then \
+					echo "FATAL: restored $(BINARY) also failed verification (exit=$$rollback_rc, output=$$(wc -c < "$$out") bytes)."; \
+				fi; \
+			fi; \
+			exit 1; \
+		fi; \
+		echo "Verified $(INSTALL_DIR)/$(BINARY) executes: $$(cat "$$out")"; \
 		trap - EXIT INT TERM HUP
 	@# Migrate from old install location: replace stale binary with symlink
 	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ]; then \
@@ -164,26 +189,6 @@ install: check-self-contained
 			echo "Symlinked $(HOME)/.local/bin/$(BINARY) -> $(INSTALL_DIR)/$(BINARY)"; \
 		fi; \
 	fi
-	@# VERIFY (ga-pmeo1): exec the installed binary with NO pipe and assert both a
-	@# zero exit AND non-empty output. `gc version | head; echo $$?` reports HEAD's
-	@# status and prints 0 for a binary that was SIGKILLed before writing anything —
-	@# that nearly produced a false all-clear during the ga-l8pur repair. A binary
-	@# killed for an invalid signature exits 137 with no output, so both halves of
-	@# this assertion are load-bearing.
-	@set -e; \
-		out=$$(mktemp); \
-		trap 'rm -f "$$out"' EXIT INT TERM HUP; \
-		set +e; "$(INSTALL_DIR)/$(BINARY)" version > "$$out" 2>&1; rc=$$?; set -e; \
-		if [ $$rc -ne 0 ] || [ ! -s "$$out" ]; then \
-			echo "FATAL: installed $(INSTALL_DIR)/$(BINARY) will not execute (exit=$$rc, output=$$(wc -c < "$$out") bytes)."; \
-			echo "       Exit 137 with no output means macOS SIGKILLed it for an invalid"; \
-			echo "       code signature. Re-run 'make install' (it swaps atomically)."; \
-			echo "       Do NOT 'cp' a binary over $(INSTALL_DIR)/$(BINARY) to recover —"; \
-			echo "       an in-place write is what causes this. See ga-pmeo1 / ga-l8pur."; \
-			exit 1; \
-		fi; \
-		echo "Verified $(INSTALL_DIR)/$(BINARY) executes: $$(cat "$$out")"; \
-		trap - EXIT INT TERM HUP
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
 
 ## generate: regenerate JSON schemas and reference docs
