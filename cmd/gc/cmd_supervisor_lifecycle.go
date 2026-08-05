@@ -44,7 +44,7 @@ var (
 	supervisorSystemdWarmRefreshStopTimeout  = 5 * time.Second
 	supervisorSystemdWarmRefreshPollInterval = 100 * time.Millisecond
 	supervisorLaunchdRefreshPollInterval     = 100 * time.Millisecond
-	launchdRefreshWaitTimeout                = 30 * time.Second
+	launchdRefreshWaitTimeout                = 90 * time.Second
 	supervisorPlistValidationTimeout         = 2 * time.Second
 	supervisorLaunchdProbeTimeout            = time.Second
 	supervisorLaunchctlTimeout               = 10 * time.Second
@@ -2079,7 +2079,7 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 			}, defaultRestartHelpers())
 		}
 		if err == nil {
-			if msg := pollLaunchdRestartVerifiedHook(installBaseURL, livePID, installOldBuildID, commit, driftReadyTimeout); msg != "" {
+			if msg := pollLaunchdRestartVerifiedHook(installBaseURL, livePID, installOldBuildID, commit, launchdRefreshWaitTimeout); msg != "" {
 				err = &launchdRestartError{err: errors.New(msg), rollbackSafe: true}
 			}
 		}
