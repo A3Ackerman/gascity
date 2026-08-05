@@ -84,8 +84,14 @@ set -e
 cp /tmp/gc-new ~/go/bin/gc.staged
 cp ~/go/bin/gc ~/go/bin/gc.bak-$(date +%Y%m%d-%H%M)
 mv ~/go/bin/gc.staged ~/go/bin/gc        # single atomic replacement; ~/.local/bin/gc symlinks here
+gc version > /tmp/gcver 2>&1; echo "exit=$? out=$(cat /tmp/gcver)"   # VERIFY before kickstart
 launchctl kickstart -k gui/$(id -u)/com.gascity.supervisor
 ```
+
+Verify **before** the kickstart, and never through a pipe: `gc version | head;
+echo $?` reports head's status and prints `0` for a binary SIGKILLed before it
+wrote a byte. A bad swap reads `exit=137` with empty output — kickstarting onto
+one takes the city down.
 
 Kickstart re-adopts (does not respawn) running tmux sessions — long-lived
 sessions keep the old binary until individually cycled; fresh subprocess
@@ -94,7 +100,11 @@ For a change that must reach long-lived sessions (tmux/runtime behavior),
 inventory them (`gc session list`) and cycle each deliberately
 (`tmux -L gastown kill-session -t <sess>` → supervisor respawns on the new
 binary); until then the town intentionally runs mixed versions — roll back
-by restoring the `gc.bak-*` binary if the mix misbehaves.
+by restoring the `gc.bak-*` binary if the mix misbehaves. **Roll back by
+rename, never `cp`**: `cp ~/go/bin/gc.bak-<stamp> ~/go/bin/gc.rollback && mv -f
+~/go/bin/gc.rollback ~/go/bin/gc`, then verify unpiped. Copying a backup
+*directly* over the live path writes into the running inode — during ga-l8pur
+that made a known-good binary exit 137 anyway.
 Verify the full effective configuration loads cleanly before trusting narrower
 commands: run `gc config show >/dev/null`, then `gc doctor`, a by-ID `gc bd show <id>`,
 and `gc status`. The config check catches transient pack-lock/cache skew after

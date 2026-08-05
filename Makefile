@@ -94,15 +94,27 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-atomic-binary-swap check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
+## The binary is produced at a temp path in the SAME directory, signed there,
+## and swapped in by ATOMIC RENAME (ga-pmeo1). Never write $(BUILD_DIR)/$(BINARY)
+## in place: `codesign --force` rewrites the file without changing its inode, and
+## on macOS a running process whose inode is rewritten underneath it is SIGKILLed
+## against the stale cached cdhash ("Code Signature Invalid"). Renaming swaps the
+## directory entry instead, so any process already running the old binary keeps
+## its own intact inode.
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
-ifeq ($(shell uname),Darwin)
-	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
-endif
+	@mkdir -p $(BUILD_DIR)
+	@set -e; \
+		tmp="$(BUILD_DIR)/.$(BINARY).build.$$$$"; \
+		trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
+		go build -ldflags "$(LDFLAGS)" -o "$$tmp" ./cmd/gc; \
+		if [ "$$(uname)" = "Darwin" ]; then scripts/sign-darwin-local.sh "$$tmp"; fi; \
+		chmod 0755 "$$tmp"; \
+		mv -f "$$tmp" "$(BUILD_DIR)/$(BINARY)"; \
+		trap - EXIT INT TERM HUP
 
 ## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
 ## Only enforced when the Nix/Flox ICU block above fired (_NIX_ICU_DEV set):
@@ -152,6 +164,26 @@ install: check-self-contained
 			echo "Symlinked $(HOME)/.local/bin/$(BINARY) -> $(INSTALL_DIR)/$(BINARY)"; \
 		fi; \
 	fi
+	@# VERIFY (ga-pmeo1): exec the installed binary with NO pipe and assert both a
+	@# zero exit AND non-empty output. `gc version | head; echo $$?` reports HEAD's
+	@# status and prints 0 for a binary that was SIGKILLed before writing anything —
+	@# that nearly produced a false all-clear during the ga-l8pur repair. A binary
+	@# killed for an invalid signature exits 137 with no output, so both halves of
+	@# this assertion are load-bearing.
+	@set -e; \
+		out=$$(mktemp); \
+		trap 'rm -f "$$out"' EXIT INT TERM HUP; \
+		set +e; "$(INSTALL_DIR)/$(BINARY)" version > "$$out" 2>&1; rc=$$?; set -e; \
+		if [ $$rc -ne 0 ] || [ ! -s "$$out" ]; then \
+			echo "FATAL: installed $(INSTALL_DIR)/$(BINARY) will not execute (exit=$$rc, output=$$(wc -c < "$$out") bytes)."; \
+			echo "       Exit 137 with no output means macOS SIGKILLed it for an invalid"; \
+			echo "       code signature. Re-run 'make install' (it swaps atomically)."; \
+			echo "       Do NOT 'cp' a binary over $(INSTALL_DIR)/$(BINARY) to recover —"; \
+			echo "       an in-place write is what causes this. See ga-pmeo1 / ga-l8pur."; \
+			exit 1; \
+		fi; \
+		echo "Verified $(INSTALL_DIR)/$(BINARY) executes: $$(cat "$$out")"; \
+		trap - EXIT INT TERM HUP
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
 
 ## generate: regenerate JSON schemas and reference docs
@@ -168,7 +200,15 @@ clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
 ## check: run fast quality gates (pre-commit: unit tests only)
-check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows test
+check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows check-atomic-binary-swap test
+
+## check-atomic-binary-swap: keep build/install swapping the gc binary by atomic
+## rename, and keep install's verification exec unpiped. An in-place write to a
+## live gc reuses the inode and SIGKILLs running processes against the stale
+## cached code signature -- silent, and it looks like a flaky supervisor.
+## See ga-l8pur (the outages) and ga-pmeo1 (this class fix).
+check-atomic-binary-swap:
+	@scripts/check-atomic-binary-swap.sh
 
 ## check-release-dist-ignore: keep GoReleaser output from marking release builds dirty
 check-release-dist-ignore:
