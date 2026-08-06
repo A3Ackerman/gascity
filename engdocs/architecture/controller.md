@@ -200,6 +200,11 @@ indicate bugs.
   a non-empty reason. Supervisor-triggered city stops reference the initiating
   `supervisor.shutdown_requested` sequence; panics carry the exit error text.
 
+- **Terminal observation follows runtime exit**: Supervisor stop helpers emit
+  `controller.stopped` and close the city recorder only after observing the
+  city goroutine's `done` signal. A bounded stop timeout returns an error but
+  leaves terminal emission to the still-running goroutine.
+
 - **Socket cleanup is best-effort**: The Unix socket at
   `.gc/controller.sock` is removed on startup (stale cleanup) and on
   shutdown. Crash-orphaned sockets are cleaned up by the next controller
