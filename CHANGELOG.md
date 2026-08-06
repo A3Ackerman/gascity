@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **OMP sessions now wait for TUI startup before receiving their initial nudge.**
+  The built-in OMP provider uses the same fixed eight-second readiness delay as
+  Pi/OpenCode-family TUIs, preventing a lost startup nudge from leaving session
+  state stuck at `creating` with no activity signal.
+
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report
