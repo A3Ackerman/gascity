@@ -3,7 +3,10 @@
 // output, optional --fix support, and a summary report.
 package doctor
 
-import "io"
+import (
+	"io"
+	"time"
+)
 
 // CheckStatus represents the outcome of a health check.
 type CheckStatus int
@@ -66,6 +69,17 @@ type CheckContext struct {
 	// the standard summary line. Today only PostgresAuthCheck honors
 	// this flag.
 	ExplainPostgresAuth bool
+	// CheckTimeout is the per-check budget the runner will wait before
+	// abandoning this check (see Doctor.boundedRun); zero means the check
+	// runs unbounded. A check that enforces its own internal deadline MUST
+	// derive it from this value rather than hardcoding one, because an inner
+	// deadline larger than the outer budget can never fire: the runner
+	// abandons the check first and reports "timed out ... (outcome unknown)"
+	// as an advisory, discarding the specific diagnostic the check would
+	// have produced. That inversion silently disabled order-firing-current's
+	// own timeout diagnostic when its internal budget was raised from 15s to
+	// 4m against a 60s default outer budget (ga-k3ieg3 / ga-ciymkk).
+	CheckTimeout time.Duration
 }
 
 // Renderer is implemented by checks that produce additional, optional

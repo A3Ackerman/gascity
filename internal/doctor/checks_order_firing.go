@@ -69,10 +69,7 @@ func (c *OrderFiringCurrentCheck) Fix(_ *CheckContext) error { return nil }
 
 // Run compares each cron or cooldown order with its order.fired history.
 func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
-	timeout := c.historyTimeout
-	if timeout <= 0 {
-		timeout = orderFiringHistoryTimeout
-	}
+	timeout := c.historyBudget(ctx)
 
 	// The order-history resolver opens the beads/Dolt store and does not accept
 	// a context. Keep that potentially blocking I/O from wedging the complete
@@ -90,9 +87,39 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusError,
 			Message: fmt.Sprintf("order history lookup timed out after %s", timeout),
-			FixHint: "check beads/Dolt connectivity, then rerun gc doctor",
+			FixHint: "check beads/Dolt connectivity, then rerun gc doctor (raise --check-timeout to allow a slower live history scan)",
 		}
 	}
+}
+
+// historyBudget resolves the order-history deadline, keeping it strictly inside
+// doctor's per-check budget.
+//
+// The history resolver opens the beads/Dolt store, so on a slow or contended
+// Dolt it can outlast any fixed budget. Both deadlines then race, and whichever
+// fires first decides what the operator sees: ours yields a specific, actionable
+// StatusError ("order history lookup timed out after ..." plus a connectivity
+// hint), while the runner's yields only an advisory "timed out ... (outcome
+// unknown)". An internal deadline at or above the outer budget therefore cannot
+// fire at all — it silently forfeits the better diagnostic, which is what
+// happened when this budget was raised from 15s to 4m against a 60s default
+// outer budget. Deriving it from CheckTimeout keeps the two consistent by
+// construction, so raising --check-timeout for a genuinely slow scan raises this
+// budget with it.
+func (c *OrderFiringCurrentCheck) historyBudget(ctx *CheckContext) time.Duration {
+	timeout := c.historyTimeout
+	if timeout <= 0 {
+		timeout = orderFiringHistoryTimeout
+	}
+	if ctx == nil || ctx.CheckTimeout <= 0 {
+		// Unbounded runner (or a direct caller): honor the configured budget.
+		return timeout
+	}
+	// Leave the runner headroom to record our result before it gives up.
+	if capped := ctx.CheckTimeout * 4 / 5; capped < timeout {
+		return capped
+	}
+	return timeout
 }
 
 func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
