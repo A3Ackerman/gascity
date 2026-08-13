@@ -163,7 +163,16 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
-					{Value: "fable-5", Label: "Fable 5", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
+					// "fable-5" carries the [1m] suffix for the same reason "opus" does
+					// (ga-ljcm7c): without it the model lands on the 200k context tier,
+					// and every fable lane spawned through gc silently lost 800k of
+					// window while the CLI accepted the suffixed form all along. The
+					// bare pin below stays in the enum so command strings baked before
+					// this change still match a schema sequence and migrate on restart
+					// instead of accumulating a duplicate --model flag — the same
+					// migration-safety contract the dated opus pins provide.
+					{Value: "fable-5", Label: "Fable 5 (1M)", FlagArgs: []string{"--model", "claude-fable-5[1m]"}, FlagAliases: [][]string{{"-m", "claude-fable-5[1m]"}}},
+					{Value: "fable-5-200k", Label: "Fable 5 (200k)", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
 					// "opus" tracks the CURRENT Opus generation at the 1M context window
 					// through the CLI's own family alias + [1m] suffix, NOT a dated model
 					// ID (Cherub 2026-07-28: agents should "default to the latest version
