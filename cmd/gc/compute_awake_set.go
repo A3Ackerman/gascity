@@ -718,6 +718,14 @@ func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, as
 	if assignee == bead.ID || assignee == bead.SessionName {
 		return true
 	}
+	// A pool worker's alias IS its canonical assignee: bdAssigneeIndex
+	// (bd_assignee_canonicalize.go) rewrites the bead-ID and session-name forms
+	// INTO the alias, so every bead a polecat claims carries the alias. Without
+	// this arm a worker mid-claim shows no assigned-work demand, drops out of
+	// the desired set, and is drained as "orphaned" seconds into real work.
+	if bead.Alias != "" && assignee == bead.Alias {
+		return true
+	}
 	if bead.NamedIdentity != "" {
 		return assignee == bead.NamedIdentity
 	}
