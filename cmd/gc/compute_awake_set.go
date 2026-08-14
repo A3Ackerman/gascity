@@ -66,6 +66,7 @@ type AwakeSessionBead struct {
 	ExplicitWake              bool      // explicit durable wake request is pending
 	DependencyOnly            bool      // only wakeable via dependency gate
 	NamedIdentity             string    // non-empty for named session beads
+	Alias                     string    // "alias" metadata: the canonical assignee form for pool workers
 	ConfiguredNamedSession    bool      // configured_named_session metadata is true
 	Pinned                    bool      // pin_awake durable wake reason
 	Drained                   bool      // state=="drained" or sleep_reason=="drained"
