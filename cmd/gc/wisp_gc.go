@@ -373,6 +373,12 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 
 		attempted++
 		if err := deleteWorkflowBead(store, c.ID); err != nil {
+			// A closed orphan can itself be an intermediate step that still
+			// owns open sub-steps; the delete refuses those. That is a skip,
+			// not a sweep failure — it becomes eligible once they finish.
+			if errors.Is(err, ErrWorkflowDeleteLiveDescendants) {
+				continue
+			}
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("reaping orphaned closed wisp %q: %w", c.ID, err))
 			continue
 		}
