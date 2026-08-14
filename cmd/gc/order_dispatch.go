@@ -3083,6 +3083,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 
 	cutoff := now.Add(-policy.deleteAfterClose)
 	deleted := 0
+	stranded := 0
 	var deleteErr error
 	for _, runs := range byOrder {
 		sort.Slice(runs, func(i, j int) bool {
@@ -3101,15 +3102,34 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 				continue
 			}
 			// deleteWorkflowBead is the graph-aware delete (dep unwind) the
-			// retention prune uses; it stays raw graph residual.
+			// retention prune uses; it stays raw graph residual. A closed
+			// tracking root can still own OPEN steps — the delete refuses
+			// those rather than stranding them (ga-ejwo1q).
 			if err := deleteWorkflowBead(store, run.ID); err != nil {
+				if errors.Is(err, ErrWorkflowDeleteLiveDescendants) {
+					stranded++
+					continue
+				}
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
 			deleted++
 		}
 	}
+	logRetainedForLiveDescendants(stranded)
 	return deleted, deleteErr
+}
+
+// logRetainedForLiveDescendants reports candidates the retention prune declined
+// to delete because they still own live work. Retention is a background sweep,
+// so a silent skip reads exactly like "nothing was eligible"; printing the
+// count is what makes a persistently-wedged root visible instead of a slow leak
+// nobody attributes.
+func logRetainedForLiveDescendants(n int) {
+	if n <= 0 {
+		return
+	}
+	log.Printf("order-tracking retention: retained %d expired closed root(s) that still own open steps (deleting them would strand the steps)", n)
 }
 
 // sweepClosedOrderTrackingRetentionBounded is the per-store bounded variant of
@@ -3135,6 +3155,7 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 
 	cutoff := now.Add(-policy.deleteAfterClose)
 	deleted := 0
+	stranded := 0
 	var deleteErr error
 	for _, runs := range byOrder {
 		if deleted >= limit {
@@ -3159,12 +3180,17 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 				continue
 			}
 			if err := deleteWorkflowBead(store, run.ID); err != nil {
+				if errors.Is(err, ErrWorkflowDeleteLiveDescendants) {
+					stranded++
+					continue
+				}
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
 			deleted++
 		}
 	}
+	logRetainedForLiveDescendants(stranded)
 	return deleted, deleteErr
 }
 
