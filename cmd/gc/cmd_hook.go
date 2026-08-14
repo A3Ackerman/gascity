@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -903,6 +904,9 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 		if isSelfBlockedHookCandidate(obj) {
 			continue
 		}
+		if isFailedPartialMoleculeHookCandidate(obj) {
+			continue
+		}
 		filtered = append(filtered, obj)
 	}
 	reencoded, err := json.Marshal(filtered)
@@ -964,6 +968,28 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 		return true
 	}
 	return false
+}
+
+// isFailedPartialMoleculeHookCandidate reports whether item is a bead of a
+// workflow whose instantiation aborted partway through. Instantiation marks
+// every bead it already wrote and clears their gc.instantiating fence, so
+// without this the failure path promoted correctly-hidden steps into every
+// agent's ready set. Such a step cannot make progress — it fails on missing
+// root metadata, closes fail, and mails an escalation — so a partial pour
+// became an escalation generator rather than work (ga-033u0e).
+//
+// This is the chokepoint that covers ALL hook surfaces: the plain ready hook,
+// the claim path (cmd_hook_claim.go), and cross-store selection
+// (hook_cross_store.go) all normalize through filterUnreadyHookCandidates. The
+// control-dispatcher's own workflow-serve scan filters the same condition
+// separately, in mergeControlReadyGroups and its jq twin.
+func isFailedPartialMoleculeHookCandidate(item map[string]any) bool {
+	metadata, ok := item["metadata"].(map[string]any)
+	if !ok {
+		return false
+	}
+	value, ok := metadata[beadmeta.MoleculeFailedMetadataKey].(string)
+	return ok && strings.EqualFold(strings.TrimSpace(value), "true")
 }
 
 // isClosedHookCandidate reports whether item is a closed bead. Defense-in-depth
