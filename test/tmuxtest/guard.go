@@ -16,6 +16,8 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +28,18 @@ import (
 )
 
 const tmuxGuardCommandTimeout = 2 * time.Second
+
+// socketProbeTimeout bounds the connect() liveness probe on one tmux socket.
+// The socket is local: a live server accepts immediately.
+const socketProbeTimeout = 250 * time.Millisecond
+
+// socketServerSettleBudget bounds how long SocketRootLiveServerPaths waits for
+// servers to finish exiting. tmux acknowledges kill-server and exits
+// asynchronously, so probing immediately after a kill can still see a listener
+// on a server that is already on its way out.
+const socketServerSettleBudget = 2 * time.Second
+
+const socketServerSettleInterval = 50 * time.Millisecond
 
 const tmuxSiblingSocketStaleAfter = 24 * time.Hour
 
@@ -178,29 +192,85 @@ func killTestSocketPath(socketPath string) error {
 	return exec.CommandContext(ctx, "tmux", "-S", socketPath, "kill-server").Run()
 }
 
-// listTestSocketPaths returns tmux socket paths for orphaned gctest cities.
 // KillSocketRootServers kills every tmux server whose socket lives under
 // socketRoot (the TMUX_TMPDIR handed to ConfigureProcessEnv), regardless of
 // socket name. Package TestMains must call this before deleting a per-run
 // socket root: removing the directory alone orphans the server processes,
 // which then accumulate holding dead cwds (ga-utvl). Returns the number of
 // servers killed.
+//
+// Killing is best-effort, so a caller about to delete socketRoot's parent must
+// also check SocketRootLiveServerPaths: deleting the directory out from under a
+// server that did NOT die puts it beyond every socket-addressed sweep in this
+// package for the rest of the host's uptime.
 func KillSocketRootServers(socketRoot string) int {
 	socketRoot = strings.TrimSpace(socketRoot)
 	if socketRoot == "" {
 		return 0
 	}
-	entries, err := filepath.Glob(filepath.Join(socketRoot, "tmux-"+strconv.Itoa(os.Getuid()), "*"))
-	if err != nil {
-		return 0
-	}
 	killed := 0
-	for _, socketPath := range entries {
+	for _, socketPath := range socketRootPaths(socketRoot) {
 		if killTestSocketPath(socketPath) == nil {
 			killed++
 		}
 	}
 	return killed
+}
+
+// SocketRootLiveServerPaths returns the socket paths under socketRoot that
+// still have a process listening, waiting up to socketServerSettleBudget for
+// servers killed a moment earlier to finish exiting. An empty result is the
+// caller's evidence that removing socketRoot's parent directory strands
+// nothing.
+//
+// Liveness is decided by connect(2), not by the socket file's presence on
+// disk. Both directions matter. A socket file outlives a server that died
+// without cleaning up, so "file exists" must not read as a live server — that
+// would pin the parent directory forever and reintroduce the unbounded
+// accumulation SweepOrphanPIDPrefixedDirs exists to stop. And a live server
+// must never read as absent, because the caller deletes the directory on the
+// strength of that answer.
+func SocketRootLiveServerPaths(socketRoot string) []string {
+	socketRoot = strings.TrimSpace(socketRoot)
+	if socketRoot == "" {
+		return nil
+	}
+	deadline := time.Now().Add(socketServerSettleBudget)
+	for {
+		live := listeningSocketPaths(socketRoot)
+		if len(live) == 0 || !time.Now().Before(deadline) {
+			return live
+		}
+		time.Sleep(socketServerSettleInterval)
+	}
+}
+
+func listeningSocketPaths(socketRoot string) []string {
+	var live []string
+	for _, socketPath := range socketRootPaths(socketRoot) {
+		if socketHasListener(socketPath) {
+			live = append(live, socketPath)
+		}
+	}
+	return live
+}
+
+func socketHasListener(socketPath string) bool {
+	conn, err := net.DialTimeout("unix", socketPath, socketProbeTimeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// socketRootPaths lists the tmux socket paths under a TMUX_TMPDIR root.
+func socketRootPaths(socketRoot string) []string {
+	entries, err := filepath.Glob(filepath.Join(socketRoot, "tmux-"+strconv.Itoa(os.Getuid()), "*"))
+	if err != nil {
+		return nil
+	}
+	return entries
 }
 
 // SweepStaleSocketRootParents reaps socket-root parent dirs matching
@@ -220,11 +290,43 @@ func SweepStaleSocketRootParents(globPattern string, staleAfter time.Duration) {
 		if err != nil || now.Sub(info.ModTime()) < staleAfter {
 			continue
 		}
-		KillSocketRootServers(filepath.Join(parent, "tmux"))
+		if !reapSocketRootParent(parent, os.Stderr) {
+			continue
+		}
 		_ = os.RemoveAll(parent)
 	}
 }
 
+// reapSocketRootParent kills the tmux servers bound to sockets under
+// <parent>/tmux and reports whether the parent is now safe to delete.
+//
+// Order is the whole point. A server whose socket directory is deleted while
+// it is still running keeps running on a path that no longer exists: every
+// sweep in this package addresses servers BY SOCKET PATH, so from that moment
+// only kill(2) by PID can reap it. Seven such servers were found on the dev
+// host — oldest 34h, all seven socket parents already gone, none reachable by
+// any sweep (ga-3qlrnv). So a survivor keeps its directory: an orphan
+// directory is a few bytes and stays reapable on the next pass, while an
+// orphan server is a process holding a dead cwd forever.
+//
+// Every refusal PRINTS, because "kept the directory" is otherwise
+// indistinguishable from "swept it" in a test log.
+func reapSocketRootParent(parent string, diagnostics io.Writer) bool {
+	socketRoot := filepath.Join(parent, "tmux")
+	KillSocketRootServers(socketRoot)
+	live := SocketRootLiveServerPaths(socketRoot)
+	if len(live) == 0 {
+		return true
+	}
+	if diagnostics != nil {
+		_, _ = fmt.Fprintf(diagnostics,
+			"tmuxtest: keeping socket parent %s: %d tmux server(s) survived kill-server (%s); removing it would strand them beyond every socket-addressed sweep\n",
+			parent, len(live), strings.Join(live, ", "))
+	}
+	return false
+}
+
+// listTestSocketPaths returns tmux socket paths for orphaned gctest cities.
 func listTestSocketPaths() []string {
 	activeRoot := strings.TrimSpace(os.Getenv(tmuxTmpEnv))
 	if activeRoot != "" {

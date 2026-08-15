@@ -199,8 +199,22 @@ type cleanupTestingM struct {
 
 func (m cleanupTestingM) Run() int {
 	code := m.m.Run()
+	// A server that survives kill-server keeps its directory. m.paths holds
+	// the PARENTS of m.tmuxSocketRoots, so one survivor anywhere holds every
+	// path back: deleting a socket directory out from under a live server
+	// leaves it reachable only by kill(2) on its PID, which no sweep in this
+	// package does (ga-3qlrnv).
+	stranded := false
 	for _, root := range m.tmuxSocketRoots {
 		tmuxtest.KillSocketRootServers(root)
+		if live := tmuxtest.SocketRootLiveServerPaths(root); len(live) > 0 {
+			stranded = true
+			fmt.Fprintf(os.Stderr, "cmd/gc: keeping tmux socket root %s: %d server(s) survived kill-server (%s)\n", //nolint:errcheck
+				root, len(live), strings.Join(live, ", "))
+		}
+	}
+	if stranded {
+		return code
 	}
 	for _, path := range m.paths {
 		if path != "" {

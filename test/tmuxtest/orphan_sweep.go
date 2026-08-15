@@ -168,6 +168,16 @@ func SweepOrphanPIDPrefixedDirs(root, prefix string, diagnostics io.Writer) {
 			}
 			reason = "pid dead, no sentinel"
 		}
+		// Reap the tmux servers under this dir BEFORE removing it. The
+		// creating PID is gone but its servers are not: they were daemonized
+		// and reparented to init, so nothing has torn them down. Removing the
+		// directory first is what makes the leak permanent — see
+		// reapSocketRootParent. This is the sweep that runs on every TestMain
+		// via NewSocketParentDir, so it is the one that decides whether a
+		// crashed run's servers get reaped or stranded.
+		if !reapSocketRootParent(path, diagnostics) {
+			continue
+		}
 		// Name each removal so a recurrence of ga-djbcqt is attributable
 		// from run logs instead of gate-log forensics.
 		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: removing orphaned socket parent %s (%s)\n", path, reason)
