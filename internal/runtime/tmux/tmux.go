@@ -592,15 +592,125 @@ const processKillGracePeriod = 2 * time.Second
 // processes that remain alive and may still be flushing state.
 const processExitCheckInterval = 25 * time.Millisecond
 
+// liveTmuxServerPIDs returns the PIDs of every running tmux SERVER process on
+// this host.
+//
+// A tmux server is identified by three properties together, which is what
+// separates it from a transient tmux CLIENT carrying identical argv: its
+// command is a tmux invocation, it is its own process-group leader (the server
+// setsid()s when it daemonizes), and it has been reparented to init. A client
+// that merely asks an existing server to do something is a short-lived child of
+// gc and matches none of the last two.
+//
+// It deliberately enumerates servers on ALL sockets rather than resolving one
+// socket's server via `tmux -L <socket> display -p '#{pid}'`. The authoritative
+// per-socket lookup needs a socket name, and the deepest kill paths
+// (terminateProcesses and below) do not have one; enumerating is also strictly
+// safer, since it protects a neighbouring city's server too. Failure to run ps
+// returns nil, which degrades to the previous unguarded behavior rather than
+// blocking a kill.
+func liveTmuxServerPIDs() map[string]bool {
+	out, err := exec.Command("ps", "-axo", "pid=,ppid=,pgid=,command=").Output()
+	if err != nil {
+		return nil
+	}
+	servers := make(map[string]bool)
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		pid, ppid, pgid := fields[0], fields[1], fields[2]
+		command := strings.Join(fields[3:], " ")
+		if pid != pgid || ppid != "1" {
+			continue
+		}
+		if !isTmuxServerCommand(command) {
+			continue
+		}
+		servers[pid] = true
+	}
+	return servers
+}
+
+// isTmuxServerCommand reports whether a process command line is a tmux
+// invocation. The tmux server keeps the argv of whatever invocation founded it,
+// so this matches `tmux -u -L <socket> new-session ...` as readily as a bare
+// `tmux`; the daemon-shape checks in liveTmuxServerPIDs are what make the
+// combination specific to a server.
+func isTmuxServerCommand(command string) bool {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return false
+	}
+	binary := command
+	if idx := strings.IndexByte(binary, ' '); idx >= 0 {
+		binary = binary[:idx]
+	}
+	return filepath.Base(binary) == "tmux"
+}
+
+// terminateProcesses signals a set of processes, NEVER including a tmux server.
+//
+// The server exclusion is not defensive tidiness; it is the guard for a
+// reproduced city-wide outage (ga-03ixvj, 3-for-3 via gc handoff). The mayor is
+// started at wave 0, when no server exists yet, and `tmux new-session` in that
+// situation does not talk to a server — it BECOMES one: tmux forks, the child
+// setsid()s keeping the original argv, and the parent client exits. So the
+// running server's command line IS the mayor's new-session, and the mayor is
+// the only session whose teardown operates on the process that is also the
+// server. Killing the mayor killed all ~15 sessions in the city, three times.
+//
+// The guard sits here, at the single choke point every kill path funnels
+// through, rather than in the four Kill* entry points. Which code path reaches
+// the server was never identified — the process-group hypothesis was measured
+// dead — so an exclusion that depends on identifying the path would not close
+// it. Refusing to signal a server is correct for every caller regardless of how
+// the PID got into the list, including callers written later.
+// tmuxServerPIDsFn and killSignalFn are indirected so a test can prove the
+// guard is actually WIRED INTO terminateProcesses, not merely that the policy
+// function works in isolation. A guard that is correct but unreferenced is the
+// failure mode worth testing against here.
+var (
+	tmuxServerPIDsFn = liveTmuxServerPIDs
+	killSignalFn     = func(pid, signal string) { _ = exec.Command("kill", "-"+signal, pid).Run() }
+)
+
 func terminateProcesses(pids []string) {
 	terminateProcessSet(
-		pids,
+		filterTmuxServerPIDs(pids, tmuxServerPIDsFn()),
 		processKillGracePeriod,
-		func(pid, signal string) { _ = exec.Command("kill", "-"+signal, pid).Run() },
+		killSignalFn,
 		processIsAlive,
 		time.Sleep,
 		time.Now,
 	)
+}
+
+// filterTmuxServerPIDs drops tmux server PIDs from a kill list and reports each
+// exclusion. It is separated from terminateProcesses so the policy is testable
+// without real processes.
+//
+// Every refusal PRINTS. A guard that silently declines to kill something is
+// indistinguishable from a guard that never fired, and this one is expected to
+// fire approximately never — so if it does, whoever is reading the log is
+// looking at the live reproduction of ga-03ixvj's unidentified signal path and
+// should be told exactly which PID was spared.
+func filterTmuxServerPIDs(pids []string, servers map[string]bool) []string {
+	if len(servers) == 0 {
+		return pids
+	}
+	filtered := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		if servers[pid] {
+			fmt.Fprintf(os.Stderr,
+				"tmux: REFUSING to signal PID %s — it is a tmux server, not a session process. "+
+					"Killing it would take down every session on that socket (ga-03ixvj).\n", pid)
+			continue
+		}
+		filtered = append(filtered, pid)
+	}
+	return filtered
 }
 
 // terminateProcessSet gives each process a graceful TERM window, but returns as

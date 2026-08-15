@@ -247,3 +247,88 @@ func TestReparentedOrphans_SkipsKnownDescendants(t *testing.T) {
 		t.Fatalf("reparentedOrphans = %v, want empty (all are known descendants)", got)
 	}
 }
+
+// TestFilterTmuxServerPIDs_SparesTheServerKillsThePane is the ga-03ixvj guard.
+// The mayor is started at wave 0 with no server running, so its new-session
+// BECOMES the server: server and pane are founded in the same instant, two PIDs
+// apart, and the server keeps the mayor's argv. Killing the mayor took the
+// whole city down three times. Whatever path put the server PID in a kill list
+// was never identified, so the guard refuses it at the choke point.
+func TestFilterTmuxServerPIDs_SparesTheServerKillsThePane(t *testing.T) {
+	// PIDs from the 21:54Z repro: server 71744, mayor pane 71746.
+	servers := map[string]bool{"71744": true}
+	got := filterTmuxServerPIDs([]string{"71744", "71746", "71750"}, servers)
+	want := []string{"71746", "71750"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("filterTmuxServerPIDs = %v, want %v — the server must be spared and everything else killed", got, want)
+	}
+}
+
+// TestFilterTmuxServerPIDs_NoServersIsAPassthrough pins that the guard cannot
+// block an ordinary kill. If ps fails, liveTmuxServerPIDs returns nil and the
+// kill list must survive intact — degrading to the old behavior beats refusing
+// to clean up a session.
+func TestFilterTmuxServerPIDs_NoServersIsAPassthrough(t *testing.T) {
+	pids := []string{"100", "200"}
+	got := filterTmuxServerPIDs(pids, nil)
+	if !slices.Equal(got, pids) {
+		t.Fatalf("filterTmuxServerPIDs with no known servers = %v, want %v unchanged", got, pids)
+	}
+}
+
+// TestIsTmuxServerCommand covers the argv half of server detection. The server
+// keeps the argv of whatever founded it, which for this city is literally the
+// mayor's new-session line — so matching must key on the binary, not on the
+// presence of a subcommand.
+func TestIsTmuxServerCommand(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		want    bool
+	}{
+		{"tmux -u -L gastown new-session -d -s gastown__mayor -c /x/.gc/agents/mayor", true},
+		{"/opt/homebrew/bin/tmux -u -L gastown new-session -d -s gastown__mayor", true},
+		{"tmux", true},
+		{"claude --model opus[1m]", false},
+		{"node /usr/local/bin/tmuxinator", false},
+		{"", false},
+	} {
+		if got := isTmuxServerCommand(tc.command); got != tc.want {
+			t.Errorf("isTmuxServerCommand(%q) = %v, want %v", tc.command, got, tc.want)
+		}
+	}
+}
+
+// TestTerminateProcessesNeverSignalsTheTmuxServer proves the ga-03ixvj guard is
+// WIRED IN, not just implemented. It drives the real terminateProcesses with a
+// stubbed server lookup and a captured kill, and asserts no signal of any kind
+// — TERM or KILL — ever reaches the server PID, while the session processes are
+// still terminated normally.
+func TestTerminateProcessesNeverSignalsTheTmuxServer(t *testing.T) {
+	const serverPID = "71744"
+
+	origServers, origKill := tmuxServerPIDsFn, killSignalFn
+	t.Cleanup(func() { tmuxServerPIDsFn, killSignalFn = origServers, origKill })
+
+	tmuxServerPIDsFn = func() map[string]bool { return map[string]bool{serverPID: true} }
+
+	var signalled []string
+	killSignalFn = func(pid, signal string) { signalled = append(signalled, signal+":"+pid) }
+
+	// The mayor's own teardown set: the server and its pane were founded in the
+	// same instant, two PIDs apart, so both land in the kill list.
+	terminateProcesses([]string{serverPID, "71746", "71750"})
+
+	for _, s := range signalled {
+		if s == "TERM:"+serverPID || s == "KILL:"+serverPID {
+			t.Fatalf("terminateProcesses signalled the tmux server (%s); signals=%v", s, signalled)
+		}
+	}
+	if len(signalled) == 0 {
+		t.Fatal("guard blocked everything — session processes must still be terminated")
+	}
+	for _, want := range []string{"TERM:71746", "TERM:71750"} {
+		if !slices.Contains(signalled, want) {
+			t.Errorf("expected %s among signals, got %v", want, signalled)
+		}
+	}
+}
