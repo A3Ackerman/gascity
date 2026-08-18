@@ -163,6 +163,19 @@ const (
 	ConvoyClosed            = "convoy.closed"
 	ControllerStarted       = "controller.started"
 	ControllerStopped       = "controller.stopped"
+	// ControlStalled fires once, when a control bead's bounded semantic-refusal
+	// retry budget expires and the control dispatcher quarantines it. Before
+	// this event the control plane had no control.* vocabulary at all, so a
+	// city whose dispatcher spent 95% of its throughput re-asking a question
+	// the store had already refused was, by construction, invisible on the
+	// event bus: no event, no metric, every health surface green. It is
+	// edge-triggered on the quarantine, not level-triggered on the retry — one
+	// emission per stalled bead under the intended single-control-dispatcher-
+	// per-city topology, never one per attempt. Control beads carry no
+	// claim/lease, so a misconfigured second dispatcher over the same store
+	// could also observe expiry and emit; consumers should tolerate a duplicate
+	// rather than assume a globally exactly-once signal.
+	ControlStalled = "control.stalled"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous
 	// supervisor instance exited (clean, crash, or unknown), derived from
@@ -336,6 +349,7 @@ var KnownEventTypes = []string{
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
+	ControlStalled,
 	CitySuspended, CityResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
