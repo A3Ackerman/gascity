@@ -51,6 +51,83 @@ and the behavior check.
 | Doctor live-rig classification (ga-w7xo) | 5886594b1 | Prevent a live rig DB on the managed endpoint from being labeled orphan. | Upstream equivalent topology classification. |
 | Navigator contract | 73d410d71, 0cdd157f7 | Stable navigator classification fields and regenerated API/dashboard clients. | Upstream exposes the same wire contract. |
 | Bundled pack pin | 6b747120d, fe59ba7c0 | Canonical core/bd pin names a real carry commit containing current embedded pack content. | Re-pin whenever current carry pack content changes. |
+| Beads schema pin | see "Beads pin" below | `go.mod` requires beads at the town's schema-v54 revision instead of upstream's v1.1.0-era pin. | Upstream's pin reaches the revision the fleet's `bd` runs — then take upstream's line unmodified. |
+
+## Beads pin — the fleet contract
+
+The native store *is* the beads library linked into `gc`, so `go.mod`'s beads
+requirement decides the highest Dolt schema version a `gc` binary can open. Our
+city databases are migrated by `bd`, and a `gc` pinned **below** the schema `bd`
+has written trips beads' schema-skew gate: native-store selection falls back to
+the exec store and everything keeps working, slower and differently. Nothing
+turns red. That is why the pin is a written contract rather than a preference.
+
+**Current pin — one line, three places that must agree:**
+
+| Where | Value |
+|---|---|
+| `go.mod` require | `github.com/steveyegge/beads v1.1.1-0.20260716185344-67652d8b5caf` |
+| Upstream commit | `67652d8b5caf` on `gastownhall/beads` main (2026-07-16), schema **v54** |
+| Every machine's `bd version` | `v1.1.1-0.20260716185344-67652d8b5caf` |
+
+`v1.1.0` — the last *tagged* beads release below this — tops out at schema
+**v53**, and so does the `v1.1.1` tag; the v54 migration
+(`0054_add_lease_columns`) exists only between them, which is why the pin is a
+pseudo-version rather than a tag. The library's exported surface is unchanged
+across that span (`beads.go` is byte-identical and `go doc -all` matches), so
+this pin buys schema catalog and nothing else — no API and no wire movement.
+
+**Every machine gets v54 from `go build` alone.** That revision is published on
+the public Go module proxy and covered by `go.sum`, so a plain checkout builds
+the right beads on every laptop, on westeros, and in CI with no per-machine
+setup. Do not reintroduce a filesystem-path replace to get it: carry commit
+`74407adde` pinned `replace github.com/steveyegge/beads => /Users/cherub/beads-src`,
+which resolved on exactly one box and left every other machine silently building
+the v1.1.0 require pin — a v53 binary against v54 stores. That replace also put
+the carry branch in violation of the repo's own required `make
+check-gomod-replace` gate, which blocks local-path replaces by policy; the
+require-pin shape passes it. `scripts/beads_module_pin_test.go` covers the half
+that gate does not — drift in the `require` line itself — and `.gitignore` keeps
+`go.work` out of the tree so a local override cannot be committed by accident.
+
+Note this is a different axis from `deps.env`'s `BD_VERSION`, which pins the bd
+*release tarball* CI and Docker install and can only name a published tag —
+`TestBDVersionPins` owns that one, and it stays where upstream left it.
+
+**Moving the pin moves the fleet.** Bump `go.mod`, the `beadsFleetPin` constant
+in that test, and the table above together, and redeploy `bd` on every machine
+in the same window — a `gc` that migrates a city DB past what the other
+machines' `bd` knows produces the same skew from the opposite side. Upstream
+`gastownhall/gascity` main has since moved to
+`v1.1.1-0.20260805093327-bf97b73749ac` (schema **v59**); adopting it is a fleet
+`bd` upgrade, not a `go.mod` edit, and stays out of carry until that upgrade is
+scheduled.
+
+**Working against a local beads checkout** (patching beads and gascity together)
+is the one case for an override. Use an **untracked** `go.work` at the repo
+root — Go's own mechanism for exactly this, and unlike a `replace` it cannot be
+committed:
+
+```sh
+# from the gascity repo root; writes go.work, which .gitignore keeps untracked
+go work init . /path/to/your/beads     # e.g. ~/code/beads, checked out at the pin
+```
+
+```go
+// go.work — untracked, per-machine, never committed
+go 1.26.5
+
+use (
+	.
+	/path/to/your/beads
+)
+```
+
+While that file exists you are no longer building the fleet pin — you are
+building whatever revision that checkout happens to be on — and `go build` will
+not say so. `go list -m github.com/steveyegge/beads` reports the local directory
+instead of the pinned pseudo-version; that is the check. Delete `go.work` before
+producing a deploy candidate.
 
 ## Deploy recipe
 
@@ -69,9 +146,11 @@ cmd/gc suite — `go vet ./...`, the `.githooks/pre-commit` hook, `make test`
 dashboard surfaces changed. Minimum for a code deploy: `go vet ./...` +
 full `go test ./cmd/gc/ -timeout 35m` (same CGO env; 17–19 min — run it
 detached, never as a foreground tool call) + the targeted package suites
-for whatever you touched. Before building, confirm `go.mod`'s beads pin
-matches installed `bd version` or the version-compat gate disables the
-native store.
+for whatever you touched. Before building, confirm the beads pin the build
+will actually resolve — `go list -m github.com/steveyegge/beads` — matches
+installed `bd version`, or the schema-skew gate disables the native store.
+Reading `go.mod` is not the same check: an untracked `go.work` overrides it
+silently (see "Beads pin" above).
 
 
 Install — the candidate doctor and atomic swap are one fail-closed shell block.

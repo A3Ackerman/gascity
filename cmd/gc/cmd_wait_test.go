@@ -730,14 +730,24 @@ func TestBuildPinnedBDBinaryForTestsMatchesGoModVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pinnedBeadsModuleVersion: %v", err)
 	}
-	wantVersion := strings.TrimPrefix(pinned, "v")
 
-	out, err := exec.Command(bdPath, "version").CombinedOutput()
-	if err != nil {
+	// bd's own `version` output is a hardcoded string that only ever matches
+	// released tags — at 67652d8b5caf it prints "1.1.0 (dev)" — so a
+	// pseudo-version pin (carry's shape since the machine-local replace was
+	// dropped) can never appear in it. The authoritative stamp for a
+	// `go install module@version` build is the binary's embedded build info;
+	// verify against that, the same by-stamp-not-by-string rule the deploy
+	// recipe applies with `go list -m`. `bd version` still runs first to
+	// prove the binary executes at all.
+	if out, err := exec.Command(bdPath, "version").CombinedOutput(); err != nil {
 		t.Fatalf("%s version: %v\n%s", bdPath, err, out)
 	}
-	if !strings.Contains(string(out), wantVersion) {
-		t.Fatalf("%s version output %q does not reflect pinned beads module version %q", bdPath, out, pinned)
+	out, err := exec.Command("go", "version", "-m", bdPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("go version -m %s: %v\n%s", bdPath, err, out)
+	}
+	if !strings.Contains(string(out), "github.com/steveyegge/beads\t"+pinned) {
+		t.Fatalf("go version -m %s output %q does not stamp pinned beads module version %q", bdPath, out, pinned)
 	}
 }
 
