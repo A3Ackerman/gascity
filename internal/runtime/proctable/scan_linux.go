@@ -85,7 +85,7 @@ func scanWithRoot(root string, target runtime.ProcessTarget) ([]runtime.LiveRunt
 		if processNeedsArgv(env, target) {
 			argv, err = readProcessArgv(root, pid)
 			if err != nil {
-				scanErr = errors.Join(scanErr, fmt.Errorf("%w: reading argv for pid %d: %v", runtime.ErrProcessIdentityIncomplete, pid, err))
+				scanErr = errors.Join(scanErr, fmt.Errorf("%w: reading argv for pid %d: %w", runtime.ErrProcessIdentityIncomplete, pid, err))
 				continue
 			}
 		}
@@ -93,7 +93,7 @@ func scanWithRoot(root string, target runtime.ProcessTarget) ([]runtime.LiveRunt
 		if processNeedsWorkDir(env, argv, target) {
 			cwd, err = readProcessCWD(root, pid)
 			if err != nil {
-				scanErr = errors.Join(scanErr, fmt.Errorf("%w: reading cwd for pid %d: %v", runtime.ErrProcessIdentityIncomplete, pid, err))
+				scanErr = errors.Join(scanErr, fmt.Errorf("%w: reading cwd for pid %d: %w", runtime.ErrProcessIdentityIncomplete, pid, err))
 				continue
 			}
 		}
@@ -217,14 +217,14 @@ func isRootWithTarget(root string, pid int, target runtime.ProcessTarget, env ma
 	if processNeedsArgv(parentEnv, target) {
 		parentArgv, err = readProcessArgv(root, ppid)
 		if err != nil {
-			return false, fmt.Errorf("%w: reading parent argv: %v", runtime.ErrProcessIdentityIncomplete, err)
+			return false, fmt.Errorf("%w: reading parent argv: %w", runtime.ErrProcessIdentityIncomplete, err)
 		}
 	}
 	parentCWD := ""
 	if processNeedsWorkDir(parentEnv, parentArgv, target) {
 		parentCWD, err = readProcessCWD(root, ppid)
 		if err != nil {
-			return false, fmt.Errorf("%w: reading parent cwd: %v", runtime.ErrProcessIdentityIncomplete, err)
+			return false, fmt.Errorf("%w: reading parent cwd: %w", runtime.ErrProcessIdentityIncomplete, err)
 		}
 	}
 	if processMatchesTarget(parentEnv, parentCWD, parentArgv, target) {
