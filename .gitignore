@@ -54,6 +54,12 @@ internal/api/dashboardspa/web/frontend/.playwright/
 .decompose/
 reports/
 
+# Per-machine Go workspace override (CARRY.md "Beads pin"). A go.work here
+# silently changes which beads a build links, so it stays untracked — the
+# committed go.mod pin is the fleet contract.
+go.work
+go.work.sum
+
 # Beads / Dolt files (added by bd init)
 .beads-credential-key
 .cache/
