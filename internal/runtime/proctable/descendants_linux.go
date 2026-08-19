@@ -12,7 +12,7 @@ import (
 // snapshotProcesses walks /proc for a host-wide pid/ppid/comm table, plus
 // each process's GC_SESSION_ID (from /proc/<pid>/environ) captured in the
 // same walk — no liveScanGuard (that guard protects the orphan sweep in
-// ScanBySessionID, not this read-only liveness snapshot) and no root
+// Scan, not this read-only liveness snapshot) and no root
 // filtering: every process gets its raw SessionID, if any.
 func snapshotProcesses() ([]ProcessRecord, error) {
 	entries, err := os.ReadDir("/proc")

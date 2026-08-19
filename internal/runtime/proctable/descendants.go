@@ -10,7 +10,7 @@ type ProcessRecord struct {
 }
 
 // SnapshotProcesses returns a host-wide process snapshot (pid, ppid, command
-// basename) for descendant-liveness matching. Unlike ScanBySessionID, this is
+// basename) for descendant-liveness matching. Unlike Scan, this is
 // a plain read of the process table with no GC_SESSION_ID filtering and no
 // liveScanGuard: it powers read-only liveness checks (e.g. a runtime
 // provider's ProcessAlive), not the orphan sweep that guard protects against.

@@ -66,6 +66,11 @@ var ErrExecUnsupported = errors.New("runtime does not implement the exec op")
 // separate signals for separate call paths.
 var ErrRuntimeUnavailable = errors.New("runtime unavailable: liveness observation failed")
 
+// ErrProcessIdentityIncomplete reports that a process scan could not prove
+// whether an alias-and-work-directory runtime is absent. A replacement start
+// must refuse while this error is present or it can race an escaped host.
+var ErrProcessIdentityIncomplete = errors.New("process identity observation incomplete")
+
 // ErrRelaunchUnsupported reports that the underlying runtime cannot relaunch the
 // agent in a warm box (it is not a [RelaunchProvider], or is conjoined like
 // subprocess/acp/t3bridge). Composite/wrapping providers return it from their
@@ -346,11 +351,27 @@ type RelaunchProvider interface {
 	Relaunch(ctx context.Context, name string, cfg Config) error
 }
 
+// ProcessTarget identifies the managed runtime incarnation and public identity
+// whose live root processes must be found before a replacement starts.
+type ProcessTarget struct {
+	// SessionID is the concrete session bead ID exported as GC_SESSION_ID.
+	SessionID string
+	// Alias is the public runtime identity exported as GC_ALIAS.
+	Alias string
+	// WorkDir is the expected agent process working directory.
+	WorkDir string
+	// ProcessNames lists agent executable names accepted inside WorkDir when a
+	// claimed host has neither managed session nor alias environment.
+	ProcessNames []string
+}
+
 // LiveRuntime identifies a single agent runtime process discovered via
 // process-table scan, independent of provider-visible artifacts.
 type LiveRuntime struct {
 	// SessionID is the GC_SESSION_ID value from the process environment.
 	SessionID string
+	// Alias is the GC_ALIAS value from the process environment.
+	Alias string
 	// City is the GC_CITY_PATH value from the process environment (falling
 	// back to GC_CITY). Empty when neither is readable. The process-table scan
 	// is supervisor-wide (it walks all of /proc), but session beads and tmux
@@ -359,6 +380,11 @@ type LiveRuntime struct {
 	// or it will mistake another city's live session for an orphan and kill
 	// it.
 	City string
+	// WorkDir is the process working directory observed from the OS process table.
+	WorkDir string
+	// ProcessName is the configured agent executable name that matched this root.
+	// Empty when the runtime matched by session ID or alias instead.
+	ProcessName string
 	// Epoch is the GC_RUNTIME_EPOCH from the process environment, if readable.
 	// Zero if the variable is absent or unparseable.
 	Epoch int
@@ -374,20 +400,20 @@ type LiveRuntime struct {
 }
 
 // ProcessTableScanner is an optional extension for runtimes that can discover
-// live agent root processes by GC_SESSION_ID independently of provider-visible
-// artifacts.
+// live agent root processes independently of provider-visible artifacts.
 //
 // Providers that cannot inspect process tables do not implement this
 // interface. Callers must use a type assertion and continue safely when the
 // provider lacks the capability.
 type ProcessTableScanner interface {
-	// FindRuntimesBySessionID returns live agent root processes carrying
-	// GC_SESSION_ID equal to id. If id is empty, it returns all live agent root
-	// processes with any GC_SESSION_ID set.
+	// FindRuntimes returns live agent root processes matching target. Exact
+	// GC_SESSION_ID matches are primary; implementations may also match a
+	// configured agent executable inside the target work directory when an
+	// escaped host process lacks managed environment.
 	//
 	// Best-effort implementations may return both partial results and a non-nil
 	// error; callers should proceed with any returned results.
-	FindRuntimesBySessionID(id string) ([]LiveRuntime, error)
+	FindRuntimes(target ProcessTarget) ([]LiveRuntime, error)
 
 	// TerminateRuntime stops the process or infrastructure unit identified by r.
 	// It returns nil when the runtime is already gone.

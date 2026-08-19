@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A claimed background provider process can no longer survive a missing tmux
+  session and race its replacement under the same agent identity.** Before
+  starting a session, the process-table gate now finds an unmanaged agent
+  executable in the session worktree even when the process lacks
+  `GC_SESSION_ID`. The gate terminates and confirms that escaped process before
+  the replacement starts, while excluding tmux server processes and other
+  managed session IDs.
+
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git
   worktree is documented to be "locked to the current commit," but the

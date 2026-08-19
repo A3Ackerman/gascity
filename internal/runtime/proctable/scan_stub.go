@@ -4,9 +4,8 @@ package proctable
 
 import "github.com/gastownhall/gascity/internal/runtime"
 
-// ScanBySessionID is unavailable on platforms without process environment
-// scanning support.
-func ScanBySessionID(string) ([]runtime.LiveRuntime, error) {
+// Scan is unavailable on platforms without process environment scanning support.
+func Scan(runtime.ProcessTarget) ([]runtime.LiveRuntime, error) {
 	return []runtime.LiveRuntime{}, nil
 }
 

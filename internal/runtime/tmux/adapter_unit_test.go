@@ -170,3 +170,19 @@ func TestProviderAttachReportsHasSessionError(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkTrackedRuntimesMatchesPaneRootPID(t *testing.T) {
+	found := []runtime.LiveRuntime{
+		{SessionID: "hq-session", PID: 100},
+		{SessionID: "hq-session", PID: 200},
+	}
+	markTrackedRuntimes(found, map[string]trackedRuntime{
+		"hq-session": {name: "worker", pid: 100},
+	})
+	if !found[0].IsTracked || found[0].ProviderName != "worker" {
+		t.Fatalf("pane root = %+v, want tracked worker", found[0])
+	}
+	if found[1].IsTracked || found[1].ProviderName != "" {
+		t.Fatalf("escaped peer = %+v, want untracked", found[1])
+	}
+}

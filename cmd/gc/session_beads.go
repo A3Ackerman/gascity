@@ -2982,7 +2982,7 @@ func sweepProcessTableOrphans(
 	if !ok {
 		return 0
 	}
-	found, err := scanner.FindRuntimesBySessionID("")
+	found, err := scanner.FindRuntimes(runtime.ProcessTarget{})
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %v\n", err) //nolint:errcheck
 	}

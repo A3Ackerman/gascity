@@ -2,9 +2,13 @@
 
 package proctable
 
-import "testing"
+import (
+	"testing"
 
-// TestScanBySessionID_RefusesLiveProcUnderTest is the regression guard for
+	"github.com/gastownhall/gascity/internal/runtime"
+)
+
+// TestScanRefusesLiveProcUnderTest is the regression guard for
 // gastownhall/gascity#2839. Under `go test` the scanner must NOT enumerate the
 // live /proc: the orphan sweep SIGTERMs any runtime missing from its (empty,
 // under-test) bead store, so on a host running a live fleet every real agent —
@@ -12,9 +16,9 @@ import "testing"
 // have no live agents, so the orphan-cleanup tests pass there and the footgun
 // only ever fired on a machine actually running gascity. This test fails if the
 // guard regresses.
-func TestScanBySessionID_RefusesLiveProcUnderTest(t *testing.T) {
-	if _, err := ScanBySessionID(""); err == nil {
-		t.Fatal("ScanBySessionID(\"\") enumerated the live /proc under `go test`; the safety guard did not fire (regression of #2839)")
+func TestScanRefusesLiveProcUnderTest(t *testing.T) {
+	if _, err := Scan(runtime.ProcessTarget{}); err == nil {
+		t.Fatal("Scan enumerated the live /proc under `go test`; the safety guard did not fire (regression of #2839)")
 	}
 }
 
@@ -31,7 +35,7 @@ func TestSetScanRootForTesting_InjectsFakeRoot(t *testing.T) {
 	restore := SetScanRootForTesting(t.TempDir())
 	defer restore()
 
-	got, err := ScanBySessionID("")
+	got, err := Scan(runtime.ProcessTarget{})
 	if err != nil {
 		t.Fatalf("with an injected fake procfs root the scan must not be refused: %v", err)
 	}

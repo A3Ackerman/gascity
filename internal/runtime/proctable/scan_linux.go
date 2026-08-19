@@ -15,13 +15,12 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// ScanBySessionID returns live agent root processes whose environment carries
-// GC_SESSION_ID equal to id. Empty id returns all roots with any GC_SESSION_ID.
-func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
+// Scan returns live agent root processes matching target.
+func Scan(target runtime.ProcessTarget) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
-	return scanWithRoot(scanRoot, id)
+	return scanWithRoot(scanRoot, target)
 }
 
 // IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
@@ -33,10 +32,7 @@ func IsScanRoot(pid int) bool {
 	if pid == 1 {
 		return true
 	}
-	if pid <= 0 {
-		return false
-	}
-	if pid == os.Getpid() {
+	if pid <= 0 || pid == os.Getpid() || isInfrastructureProcess(scanRoot, pid) {
 		return false
 	}
 	env, err := parseEnvironFile(filepath.Join(scanRoot, strconv.Itoa(pid), "environ"))
@@ -47,14 +43,19 @@ func IsScanRoot(pid int) bool {
 	if sessionID == "" {
 		return false
 	}
-	isRoot, err := isRootWithSessionID(scanRoot, pid, sessionID)
+	cwd, err := readProcessCWD(scanRoot, pid)
+	if err != nil {
+		return false
+	}
+	target := runtime.ProcessTarget{SessionID: sessionID}
+	isRoot, err := isRootWithTarget(scanRoot, pid, target, env, cwd, nil)
 	return err == nil && isRoot
 }
 
-func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
+func scanWithRoot(root string, target runtime.ProcessTarget) ([]runtime.LiveRuntime, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return []runtime.LiveRuntime{}, fmt.Errorf("enumerating %s: %w", root, err)
+		return []runtime.LiveRuntime{}, identityObservationError("enumerating "+root, err)
 	}
 
 	var (
@@ -66,7 +67,7 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 			continue
 		}
 		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 1 {
+		if err != nil || pid <= 1 || isInfrastructureProcess(root, pid) {
 			continue
 		}
 		env, err := parseEnvironFile(filepath.Join(root, entry.Name(), "environ"))
@@ -80,14 +81,26 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 		if len(env) == 0 {
 			continue
 		}
-		sessionID := env["GC_SESSION_ID"]
-		if sessionID == "" {
+		var argv []string
+		if processNeedsArgv(env, target) {
+			argv, err = readProcessArgv(root, pid)
+			if err != nil {
+				scanErr = errors.Join(scanErr, fmt.Errorf("%w: reading argv for pid %d: %v", runtime.ErrProcessIdentityIncomplete, pid, err))
+				continue
+			}
+		}
+		cwd := ""
+		if processNeedsWorkDir(env, argv, target) {
+			cwd, err = readProcessCWD(root, pid)
+			if err != nil {
+				scanErr = errors.Join(scanErr, fmt.Errorf("%w: reading cwd for pid %d: %v", runtime.ErrProcessIdentityIncomplete, pid, err))
+				continue
+			}
+		}
+		if !processMatchesTarget(env, cwd, argv, target) {
 			continue
 		}
-		if id != "" && sessionID != id {
-			continue
-		}
-		rootProcess, err := isRootWithSessionID(root, pid, sessionID)
+		rootProcess, err := isRootWithTarget(root, pid, target, env, cwd, argv)
 		if err != nil {
 			scanErr = errors.Join(scanErr, fmt.Errorf("checking root for pid %d: %w", pid, err))
 			continue
@@ -101,10 +114,13 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 			city = env["GC_CITY"]
 		}
 		out = append(out, runtime.LiveRuntime{
-			SessionID: sessionID,
-			City:      city,
-			Epoch:     epoch,
-			PID:       pid,
+			SessionID:   env["GC_SESSION_ID"],
+			Alias:       env["GC_ALIAS"],
+			City:        city,
+			WorkDir:     cwd,
+			ProcessName: matchingProcessName(argv, target.ProcessNames),
+			Epoch:       epoch,
+			PID:         pid,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -152,7 +168,35 @@ func parseEnvironFile(path string) (map[string]string, error) {
 	return env, nil
 }
 
-func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
+func readProcessCWD(root string, pid int) (string, error) {
+	cwd, err := os.Readlink(filepath.Join(root, strconv.Itoa(pid), "cwd"))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	return cwd, nil
+}
+
+func readProcessArgv(root string, pid int) ([]string, error) {
+	data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var argv []string
+	for _, arg := range strings.Split(string(data), "\x00") {
+		if arg != "" {
+			argv = append(argv, arg)
+		}
+	}
+	return argv, nil
+}
+
+func isRootWithTarget(root string, pid int, target runtime.ProcessTarget, env map[string]string, cwd string, argv []string) (bool, error) {
 	ppid, ok, err := readParentPID(filepath.Join(root, strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return false, err
@@ -169,13 +213,27 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureParent(root, ppid) {
-		return true, nil
+	var parentArgv []string
+	if processNeedsArgv(parentEnv, target) {
+		parentArgv, err = readProcessArgv(root, ppid)
+		if err != nil {
+			return false, fmt.Errorf("%w: reading parent argv: %v", runtime.ErrProcessIdentityIncomplete, err)
+		}
 	}
-	return parentEnv["GC_SESSION_ID"] != sessionID, nil
+	parentCWD := ""
+	if processNeedsWorkDir(parentEnv, parentArgv, target) {
+		parentCWD, err = readProcessCWD(root, ppid)
+		if err != nil {
+			return false, fmt.Errorf("%w: reading parent cwd: %v", runtime.ErrProcessIdentityIncomplete, err)
+		}
+	}
+	if processMatchesTarget(parentEnv, parentCWD, parentArgv, target) {
+		return isInfrastructureProcess(root, ppid), nil
+	}
+	return processMatchesTarget(env, cwd, argv, target), nil
 }
 
-func isInfrastructureParent(root string, pid int) bool {
+func isInfrastructureProcess(root string, pid int) bool {
 	data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "comm"))
 	if err != nil {
 		return false

@@ -97,6 +97,7 @@ type orphanScanProvider struct {
 	findErr      error
 	terminateErr error
 	events       []string
+	targets      []runtime.ProcessTarget
 }
 
 func (p *orphanScanProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
@@ -104,13 +105,17 @@ func (p *orphanScanProvider) Start(ctx context.Context, name string, cfg runtime
 	return p.Fake.Start(ctx, name, cfg)
 }
 
-func (p *orphanScanProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
-	p.events = append(p.events, "find:"+id)
+func (p *orphanScanProvider) FindRuntimes(target runtime.ProcessTarget) ([]runtime.LiveRuntime, error) {
+	p.targets = append(p.targets, target)
+	p.events = append(p.events, "find:"+target.SessionID)
 	out := make([]runtime.LiveRuntime, len(p.results))
 	copy(out, p.results)
 	for i := range out {
-		if out[i].SessionID == "" {
-			out[i].SessionID = id
+		if out[i].SessionID == "$target" {
+			out[i].SessionID = target.SessionID
+		}
+		if out[i].SessionID == "" && out[i].Alias == "" && out[i].ProcessName == "" {
+			out[i].SessionID = target.SessionID
 		}
 	}
 	return out, p.findErr
@@ -510,6 +515,154 @@ func TestCreateKillsUntrackedOrphanFromSameCityBeforeStartWithNormalizedPath(t *
 	}
 }
 
+func TestProcessIdentityNamesPrefersConfiguredPrimaryProcess(t *testing.T) {
+	got := processIdentityNames(runtime.Config{
+		Command:      "env GC_MODE=managed claude --resume abc",
+		ProcessNames: []string{"node", "claude"},
+	})
+	if len(got) != 1 || got[0] != "claude" {
+		t.Fatalf("processIdentityNames() = %v, want [claude]", got)
+	}
+}
+
+func TestProcessIdentityNamesFallsBackToCommand(t *testing.T) {
+	got := processIdentityNames(runtime.Config{Command: "/usr/local/bin/omp --hook .omp/hooks/gc-hook.ts"})
+	if len(got) != 1 || got[0] != "omp" {
+		t.Fatalf("processIdentityNames() = %v, want [omp]", got)
+	}
+}
+
+func TestProcessIdentityNamesPrefersCommandWhenConfiguredNamesContainIt(t *testing.T) {
+	got := processIdentityNames(runtime.Config{
+		Command:      "claude --resume abc",
+		ProcessNames: []string{"node", "claude"},
+	})
+	if len(got) != 1 || got[0] != "claude" {
+		t.Fatalf("processIdentityNames() = %v, want [claude]", got)
+	}
+}
+
+func TestCreateKillsAgentProcessInWorkDirBeforeStart(t *testing.T) {
+	cityPath := t.TempDir()
+	workDir := t.TempDir()
+	const alias = "qcore/dalinar"
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake: runtime.NewFake(),
+		results: []runtime.LiveRuntime{{
+			PID:         1234,
+			WorkDir:     workDir,
+			ProcessName: "claude",
+			IsTracked:   false,
+		}},
+	}
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Alias:     alias,
+		Template:  "helper",
+		Command:   "claude",
+		WorkDir:   workDir,
+		Provider:  "claude",
+		Hints:     runtime.Config{ProcessNames: []string{"claude", "node"}},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(sp.targets) != 1 {
+		t.Fatalf("scan targets = %+v, want one", sp.targets)
+	}
+	if got := sp.targets[0]; got.SessionID != info.ID || got.Alias != alias || got.WorkDir != workDir {
+		t.Fatalf("scan target = %+v, want session=%q alias=%q workdir=%q", got, info.ID, alias, workDir)
+	}
+	if got := sp.targets[0]; len(got.ProcessNames) != 1 || got.ProcessNames[0] != "claude" {
+		t.Fatalf("scan target process names = %v, want [claude]", got.ProcessNames)
+	}
+	want := []string{"find:" + info.ID, "terminate:", "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+func TestCreateKillsExactSessionWithoutCityWhenProcessWorkDirMatches(t *testing.T) {
+	workDir := t.TempDir()
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake: runtime.NewFake(),
+		results: []runtime.LiveRuntime{{
+			SessionID:   "$target",
+			WorkDir:     workDir,
+			ProcessName: "claude",
+			PID:         1234,
+		}},
+	}
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template:  "helper",
+		Command:   "claude",
+		WorkDir:   workDir,
+		Provider:  "claude",
+		Hints:     runtime.Config{ProcessNames: []string{"node", "claude"}},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+func TestCreateRefusesStartWhenProcessScanIsIncomplete(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake:    runtime.NewFake(),
+		findErr: fmt.Errorf("%w: cwd scan failed", runtime.ErrProcessIdentityIncomplete),
+	}
+	mgr := NewManagerWithOptions(store, sp)
+
+	_, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Alias:     "qcore/dalinar",
+		Template:  "helper",
+		Command:   "claude",
+		WorkDir:   t.TempDir(),
+		Provider:  "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "process scan incomplete") {
+		t.Fatalf("Create error = %v, want incomplete process scan refusal", err)
+	}
+	if hasEventPrefix(sp.events, "start:") {
+		t.Fatalf("Start was attempted after incomplete process scan; events = %v", sp.events)
+	}
+}
+
+func TestCreateContinuesAfterNonIdentityPartialScan(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake:    runtime.NewFake(),
+		findErr: errors.New("unrelated process entry disappeared"),
+	}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template:  "helper",
+		Command:   "claude",
+		WorkDir:   t.TempDir(),
+		Provider:  "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !hasEventPrefix(sp.events, "start:"+info.ID) {
+		t.Fatalf("Start was not attempted after an unrelated partial scan; events = %v", sp.events)
+	}
+}
+
 // TestCreateRefusesStartWhenOrphanNotConfirmedDead pins the fail-closed
 // contract: when an untracked same-session orphan cannot be confirmed dead
 // (TerminateRuntime errors — e.g. it survived SIGKILL), Create must refuse to
@@ -806,7 +959,7 @@ func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 // cleanup" invariant while tolerating the gate wrapper that consumes the
 // cleanup's error.
 func orphanCleanupPrecedes(lines []string, before int, idExpr string) bool {
-	needle := "m.killExistingOrphans(ctx, " + idExpr + ")"
+	needle := "m.killExistingOrphans(ctx, " + idExpr + ", cfg)"
 	const window = 10
 	seen := 0
 	for i := before - 1; i >= 0 && seen < window; i-- {
@@ -1746,6 +1899,7 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 	}
 	if start == nil {
 		t.Fatalf("Start call not recorded: %#v", sp.Calls)
+		return
 	}
 	env := start.Config.Env
 	for key, want := range map[string]string{
@@ -1781,6 +1935,7 @@ func TestCreateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) {
 	cfg := sp.LastStartConfig("test-city--mayor")
 	if cfg == nil {
 		t.Fatalf("Start call not recorded: %#v", sp.Calls)
+		return
 	}
 	if got := cfg.Env["GC_PROVIDER"]; got != "claude" {
 		t.Fatalf("GC_PROVIDER = %q, want claude for %s", got, info.ID)
@@ -1816,6 +1971,7 @@ func TestAttachUsesBuiltinAncestorForGCProviderEnv(t *testing.T) {
 	cfg := sp.LastStartConfig("test-city--worker")
 	if cfg == nil {
 		t.Fatalf("Start call not recorded: %#v", sp.Calls)
+		return
 	}
 	if got := cfg.Env["GC_PROVIDER"]; got != "claude" {
 		t.Fatalf("GC_PROVIDER = %q, want claude", got)
@@ -1845,6 +2001,7 @@ func TestCreateAliaslessMultiSessionUsesConcreteRuntimeIdentity(t *testing.T) {
 	}
 	if start == nil {
 		t.Fatalf("Start call not recorded: %#v", sp.Calls)
+		return
 	}
 	env := start.Config.Env
 	for key, want := range map[string]string{
@@ -2327,6 +2484,7 @@ func TestCreateWithSessionID(t *testing.T) {
 	started := sp.LastStartConfig(info.SessionName)
 	if started == nil {
 		t.Fatal("session was not started")
+		return
 	}
 	if !strings.Contains(started.Command, "--session-id "+info.SessionKey) {
 		t.Errorf("start command = %q, should contain --session-id %s", started.Command, info.SessionKey)
@@ -2505,6 +2663,7 @@ func TestCreateWithResumeFlagNoSessionIDFlag(t *testing.T) {
 	started := sp.LastStartConfig(info.SessionName)
 	if started == nil {
 		t.Fatal("session was not started")
+		return
 	}
 	if started.Command != "codex --model o3" {
 		t.Errorf("start command = %q, want %q", started.Command, "codex --model o3")

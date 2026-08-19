@@ -295,9 +295,9 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	return p.IsRunning(name)
 }
 
-// FindRuntimesBySessionID implements [runtime.ProcessTableScanner].
-func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
-	found, scanErr := proctable.ScanBySessionID(id)
+// FindRuntimes implements [runtime.ProcessTableScanner].
+func (p *Provider) FindRuntimes(target runtime.ProcessTarget) ([]runtime.LiveRuntime, error) {
+	found, scanErr := proctable.Scan(target)
 
 	p.mu.Lock()
 	trackedBySessionID := make(map[string]string)

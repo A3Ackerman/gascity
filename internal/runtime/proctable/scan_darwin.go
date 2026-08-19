@@ -3,39 +3,102 @@
 package proctable
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// ScanBySessionID returns live agent root processes whose environment carries
-// GC_SESSION_ID equal to id. Empty id returns all roots with any GC_SESSION_ID.
-func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
+// Scan returns live agent root processes matching target.
+func Scan(target runtime.ProcessTarget) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
 	records, err := psRecords()
 	if err != nil {
-		return []runtime.LiveRuntime{}, err
+		return []runtime.LiveRuntime{}, identityObservationError("reading process table", err)
 	}
+	if err := populateDarwinCWDs(records, target); err != nil {
+		return scanDarwinRecords(records, target), err
+	}
+	return scanDarwinRecords(records, target), nil
+}
+
+func populateDarwinCWDs(records map[int]psRecord, target runtime.ProcessTarget) error {
+	if target.WorkDir == "" || target.Alias == "" && len(target.ProcessNames) == 0 {
+		return nil
+	}
+	pidSet := make(map[int]struct{})
+	for _, record := range records {
+		if !processNeedsWorkDir(record.env, record.argv, target) {
+			continue
+		}
+		pidSet[record.pid] = struct{}{}
+		if parent, ok := records[record.ppid]; ok && processNeedsWorkDir(parent.env, parent.argv, target) {
+			pidSet[parent.pid] = struct{}{}
+		}
+	}
+	if len(pidSet) == 0 {
+		return nil
+	}
+	pids := make([]int, 0, len(pidSet))
+	for pid := range pidSet {
+		pids = append(pids, pid)
+	}
+	slices.Sort(pids)
+	rawPIDs := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		rawPIDs = append(rawPIDs, strconv.Itoa(pid))
+	}
+	out, cmdErr := exec.Command("/usr/sbin/lsof", "-a", "-d", "cwd", "-Fn", "-p", strings.Join(rawPIDs, ",")).Output()
+	cwds := parseDarwinCWDs(string(out))
+	for pid := range pidSet {
+		cwd, ok := cwds[pid]
+		if !ok {
+			if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+				delete(records, pid)
+				continue
+			}
+			return fmt.Errorf("%w: reading cwd for pid %d: %w", runtime.ErrProcessIdentityIncomplete, pid, cmdErr)
+		}
+		record, ok := records[pid]
+		if !ok {
+			continue
+		}
+		record.cwd = cwd
+		records[pid] = record
+	}
+	return nil
+}
+
+func parseDarwinCWDs(output string) map[int]string {
+	cwds := make(map[int]string)
+	pid := 0
+	for _, line := range strings.Split(output, "\n") {
+		switch {
+		case strings.HasPrefix(line, "p"):
+			pid, _ = strconv.Atoi(strings.TrimPrefix(line, "p"))
+		case pid > 0 && strings.HasPrefix(line, "n"):
+			cwds[pid] = strings.TrimPrefix(line, "n")
+		}
+	}
+	return cwds
+}
+
+func scanDarwinRecords(records map[int]psRecord, target runtime.ProcessTarget) []runtime.LiveRuntime {
 	var out []runtime.LiveRuntime
 	for _, record := range records {
-		if record.pid <= 1 {
+		if record.pid <= 1 || isInfrastructureCommand(record.command) || !recordMatchesTarget(record, target) {
 			continue
 		}
-		sessionID := record.env["GC_SESSION_ID"]
-		if sessionID == "" {
-			continue
-		}
-		if id != "" && sessionID != id {
-			continue
-		}
-		if parent, ok := records[record.ppid]; ok && parent.env["GC_SESSION_ID"] == sessionID && !isInfrastructureCommand(parent.command) {
+		if parent, ok := records[record.ppid]; ok && recordMatchesTarget(parent, target) && !isInfrastructureCommand(parent.command) {
 			continue
 		}
 		epoch, _ := strconv.Atoi(record.env["GC_RUNTIME_EPOCH"])
@@ -44,10 +107,13 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 			city = record.env["GC_CITY"]
 		}
 		out = append(out, runtime.LiveRuntime{
-			SessionID: sessionID,
-			City:      city,
-			Epoch:     epoch,
-			PID:       record.pid,
+			SessionID:   record.env["GC_SESSION_ID"],
+			Alias:       record.env["GC_ALIAS"],
+			City:        city,
+			WorkDir:     record.cwd,
+			ProcessName: matchingProcessName(record.argv, target.ProcessNames),
+			Epoch:       epoch,
+			PID:         record.pid,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -56,7 +122,11 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if out == nil {
 		out = []runtime.LiveRuntime{}
 	}
-	return out, nil
+	return out
+}
+
+func recordMatchesTarget(record psRecord, target runtime.ProcessTarget) bool {
+	return processMatchesTarget(record.env, record.cwd, record.argv, target)
 }
 
 // IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
@@ -79,7 +149,7 @@ func IsScanRoot(pid int) bool {
 		return false
 	}
 	record, ok := records[pid]
-	if !ok {
+	if !ok || isInfrastructureCommand(record.command) {
 		return false
 	}
 	sessionID := record.env["GC_SESSION_ID"]
@@ -95,6 +165,8 @@ type psRecord struct {
 	ppid    int
 	command string
 	env     map[string]string
+	argv    []string
+	cwd     string
 }
 
 func psRecords() (map[int]psRecord, error) {
@@ -124,6 +196,7 @@ func psRecords() (map[int]psRecord, error) {
 			pid:     pid,
 			ppid:    ppid,
 			command: darwinPSCommand(fields),
+			argv:    darwinPSArgv(fields),
 			env:     parseInlineEnv(fields[2:]),
 		}
 	}

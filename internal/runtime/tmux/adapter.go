@@ -329,9 +329,9 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	return p.cache.ProcessAlive(name, processNames)
 }
 
-// FindRuntimesBySessionID implements [runtime.ProcessTableScanner].
-func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
-	found, scanErr := proctable.ScanBySessionID(id)
+// FindRuntimes implements [runtime.ProcessTableScanner].
+func (p *Provider) FindRuntimes(target runtime.ProcessTarget) ([]runtime.LiveRuntime, error) {
+	found, scanErr := proctable.Scan(target)
 	running, listErr := p.ListRunning("")
 	if listErr != nil {
 		// Fail CLOSED: without the live-session list we cannot prove which
@@ -361,20 +361,40 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr))
 	}
 
-	tracked := make(map[string]string)
+	tracked := make(map[string]trackedRuntime)
 	for _, name := range running {
 		sessionID, err := p.GetMeta(name, "GC_SESSION_ID")
-		if err == nil && strings.TrimSpace(sessionID) != "" {
-			tracked[sessionID] = name
+		if err != nil || strings.TrimSpace(sessionID) == "" {
+			continue
 		}
-	}
-	for i := range found {
-		if name, ok := tracked[found[i].SessionID]; ok {
-			found[i].IsTracked = true
-			found[i].ProviderName = name
+		panePID, err := p.tm.GetPanePID(name)
+		if err != nil {
+			continue
 		}
+		pid, err := strconv.Atoi(strings.TrimSpace(panePID))
+		if err != nil || pid <= 1 {
+			continue
+		}
+		tracked[sessionID] = trackedRuntime{name: name, pid: pid}
 	}
+	markTrackedRuntimes(found, tracked)
 	return found, scanErr
+}
+
+type trackedRuntime struct {
+	name string
+	pid  int
+}
+
+func markTrackedRuntimes(found []runtime.LiveRuntime, tracked map[string]trackedRuntime) {
+	for i := range found {
+		trackedRoot, ok := tracked[found[i].SessionID]
+		if !ok || trackedRoot.pid != found[i].PID {
+			continue
+		}
+		found[i].IsTracked = true
+		found[i].ProviderName = trackedRoot.name
+	}
 }
 
 // TerminateRuntime implements [runtime.ProcessTableScanner].

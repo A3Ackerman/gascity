@@ -39,9 +39,9 @@ func seamBack(raw *Provider) *seamBackedProvider {
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
 }
 
-// FindRuntimesBySessionID implements [runtime.ProcessTableScanner] (non-seam).
-func (s *seamBackedProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
-	return s.raw.FindRuntimesBySessionID(id)
+// FindRuntimes implements [runtime.ProcessTableScanner] (non-seam).
+func (s *seamBackedProvider) FindRuntimes(target runtime.ProcessTarget) ([]runtime.LiveRuntime, error) {
+	return s.raw.FindRuntimes(target)
 }
 
 // TerminateRuntime implements [runtime.ProcessTableScanner] (non-seam).

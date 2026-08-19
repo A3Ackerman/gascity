@@ -213,7 +213,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	// not be confirmed dead: a survivor would race this replacement for the
 	// same work bead. This path reuses the existing bead ID, so there is no
 	// fresh-create to roll back — unroute and propagate the error before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+	if orphanErr := m.killExistingOrphans(ctx, id, cfg); orphanErr != nil {
 		if unroute != nil {
 			unroute()
 		}
@@ -388,7 +388,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
 	// exact "old process survives alongside its replacement" scenario. No
 	// fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+	if orphanErr := m.killExistingOrphans(ctx, id, cfg); orphanErr != nil {
 		if unroute != nil {
 			unroute()
 		}
@@ -504,7 +504,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	// be confirmed dead: a survivor would race this replacement for the same
 	// work bead. This is the reconciler respawn bridge on a stable/reused bead
 	// ID. No fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+	if orphanErr := m.killExistingOrphans(ctx, id, cfg); orphanErr != nil {
 		if unroute != nil {
 			unroute()
 		}

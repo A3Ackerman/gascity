@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // buildFakeProc builds a minimal /proc-shaped fixture tree under root for pid
@@ -45,7 +47,7 @@ func TestScanWithRootStatVanished(t *testing.T) {
 	}
 	// stat file absent — simulates TOCTOU race.
 
-	got, err := scanWithRoot(root, "ga-test")
+	got, err := scanWithRoot(root, runtime.ProcessTarget{SessionID: "ga-test"})
 	if err != nil {
 		t.Fatalf("scanWithRoot error: %v", err)
 	}
@@ -56,7 +58,7 @@ func TestScanWithRootStatVanished(t *testing.T) {
 
 func TestScanWithRootEmptyReturnsNonNilSlice(t *testing.T) {
 	root := t.TempDir()
-	got, err := scanWithRoot(root, "")
+	got, err := scanWithRoot(root, runtime.ProcessTarget{})
 	if err != nil {
 		t.Fatalf("scanWithRoot error: %v", err)
 	}
@@ -75,7 +77,7 @@ func TestScanWithRootFiltersBySessionID(t *testing.T) {
 	// pid 200: parent 1 (init), session ga-xyz
 	buildFakeProc(t, root, 200, map[string]string{"GC_SESSION_ID": "ga-xyz"})
 
-	got, err := scanWithRoot(root, "ga-abc")
+	got, err := scanWithRoot(root, runtime.ProcessTarget{SessionID: "ga-abc"})
 	if err != nil {
 		t.Fatalf("scanWithRoot error: %v", err)
 	}
@@ -89,7 +91,7 @@ func TestScanWithRootEmptyIDReturnsAll(t *testing.T) {
 	buildFakeProc(t, root, 100, map[string]string{"GC_SESSION_ID": "ga-abc"})
 	buildFakeProc(t, root, 200, map[string]string{"GC_SESSION_ID": "ga-xyz"})
 
-	got, err := scanWithRoot(root, "")
+	got, err := scanWithRoot(root, runtime.ProcessTarget{})
 	if err != nil {
 		t.Fatalf("scanWithRoot error: %v", err)
 	}
@@ -105,7 +107,7 @@ func TestScanWithRootParsesEpoch(t *testing.T) {
 		"GC_RUNTIME_EPOCH": "42",
 	})
 
-	got, err := scanWithRoot(root, "ga-epoch")
+	got, err := scanWithRoot(root, runtime.ProcessTarget{SessionID: "ga-epoch"})
 	if err != nil {
 		t.Fatalf("scanWithRoot error: %v", err)
 	}
@@ -125,7 +127,7 @@ func TestScanWithRootPopulatesCityFromGCPath(t *testing.T) {
 		"GC_CITY":       "/tmp/fallback-city",
 	})
 
-	got, err := scanWithRoot(root, "ga-city")
+	got, err := scanWithRoot(root, runtime.ProcessTarget{SessionID: "ga-city"})
 	if err != nil {
 		t.Fatalf("scanWithRoot error: %v", err)
 	}
@@ -144,7 +146,7 @@ func TestScanWithRootPopulatesCityFromGCCityFallback(t *testing.T) {
 		"GC_CITY":       "/tmp/fallback-city",
 	})
 
-	got, err := scanWithRoot(root, "ga-city")
+	got, err := scanWithRoot(root, runtime.ProcessTarget{SessionID: "ga-city"})
 	if err != nil {
 		t.Fatalf("scanWithRoot error: %v", err)
 	}
@@ -163,11 +165,38 @@ func TestScanWithRootMissingEnvironSkipped(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	got, err := scanWithRoot(root, "")
+	got, err := scanWithRoot(root, runtime.ProcessTarget{})
 	if err != nil {
 		t.Fatalf("scanWithRoot error: %v", err)
 	}
 	if len(got) != 0 {
 		t.Fatalf("got %d entries, want 0", len(got))
+	}
+}
+
+func TestScanWithRootMatchesAgentCommandAndWorkDirWithoutManagedEnv(t *testing.T) {
+	root := t.TempDir()
+	workDir := t.TempDir()
+	buildFakeProc(t, root, 500, map[string]string{"PATH": "/usr/bin"})
+	if err := os.WriteFile(filepath.Join(root, "500", "cmdline"), []byte("claude\x00"), 0o644); err != nil {
+		t.Fatalf("write cmdline: %v", err)
+	}
+	if err := os.Symlink(workDir, filepath.Join(root, "500", "cwd")); err != nil {
+		t.Fatalf("symlink cwd: %v", err)
+	}
+
+	got, err := scanWithRoot(root, runtime.ProcessTarget{
+		SessionID:    "hq-session",
+		WorkDir:      workDir,
+		ProcessNames: []string{"claude"},
+	})
+	if err != nil {
+		t.Fatalf("scanWithRoot error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("scanWithRoot returned %d runtimes, want 1: %+v", len(got), got)
+	}
+	if got[0].PID != 500 || got[0].SessionID != "" || got[0].ProcessName != "claude" || got[0].WorkDir != workDir {
+		t.Fatalf("scanWithRoot runtime = %+v, want pid=500 process=claude workdir=%q without managed env", got[0], workDir)
 	}
 }

@@ -31,7 +31,7 @@ func liveScanGuard() error {
 	return nil
 }
 
-// SetScanRootForTesting overrides the procfs root used by ScanBySessionID and
+// SetScanRootForTesting overrides the procfs root used by Scan and
 // IsScanRoot, returning a restore function. It exists only so tests can drive
 // the scanner against a controlled, fake procfs tree instead of the host's.
 func SetScanRootForTesting(root string) (restore func()) {

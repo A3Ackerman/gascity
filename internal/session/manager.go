@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -684,30 +685,41 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 	_ = m.store.SetMetadata(id, "transport", transport)
 }
 
-// killExistingOrphans terminates any untracked runtime whose session ID and
-// city match the session about to start, then confirms each is dead. It returns
-// a non-nil error only when an orphan could not be confirmed dead, so callers
-// gating a Start can refuse rather than race a survivor for the same work. A
-// scan error is logged and treated as fail-closed (see FindRuntimesBySessionID):
-// the roots the scan did surface are still killed, and matching the started
-// replacement is impossible because it does not exist yet.
-func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
+// killExistingOrphans terminates any untracked runtime matching the session ID
+// or the configured agent executable plus work directory of the session about
+// to start, then confirms each is dead. The executable/work-directory fallback
+// covers claimed background hosts that escaped without managed environment.
+func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string, cfg runtime.Config) error {
 	_ = ctx
 	scanner, ok := m.sp.(runtime.ProcessTableScanner)
 	if !ok || sessionID == "" {
 		return nil
 	}
-	found, err := scanner.FindRuntimesBySessionID(sessionID)
-	if err != nil {
-		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %v", sessionID, err)
+	target := runtime.ProcessTarget{
+		SessionID:    sessionID,
+		Alias:        strings.TrimSpace(cfg.Env["GC_ALIAS"]),
+		WorkDir:      strings.TrimSpace(cfg.WorkDir),
+		ProcessNames: processIdentityNames(cfg),
+	}
+	found, scanErr := scanner.FindRuntimes(target)
+	if scanErr != nil {
+		log.Printf("session: partial scan for orphaned runtimes for %s: %v", sessionID, scanErr)
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	var termErrs []error
 	for _, live := range found {
-		if live.IsTracked || live.SessionID != sessionID {
+		if live.IsTracked {
 			continue
 		}
-		if cityPath != "" && pathutil.NormalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
+		exactSession := live.SessionID == target.SessionID
+		sameWorkDir := pathutil.PathWithin(target.WorkDir, live.WorkDir)
+		sameProcess := processTargetIncludesName(target, live.ProcessName)
+		aliasesCompatible := target.Alias == "" || live.Alias == "" || target.Alias == live.Alias
+		samePublicIdentity := sameWorkDir && sameProcess && aliasesCompatible
+		if !exactSession && !samePublicIdentity {
+			continue
+		}
+		if exactSession && cityPath != "" && pathutil.NormalizePathForCompare(strings.TrimSpace(live.City)) != cityPath && !samePublicIdentity {
 			continue
 		}
 		if err := scanner.TerminateRuntime(live); err != nil {
@@ -715,10 +727,59 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
 		}
 	}
+	if errors.Is(scanErr, runtime.ErrProcessIdentityIncomplete) {
+		termErrs = append(termErrs, fmt.Errorf("process scan incomplete: %w", scanErr))
+	}
 	if len(termErrs) > 0 {
 		return fmt.Errorf("%d orphaned runtime(s) not confirmed dead: %w", len(termErrs), errors.Join(termErrs...))
 	}
 	return nil
+}
+
+func processIdentityNames(cfg runtime.Config) []string {
+	firstConfigured := ""
+	for _, name := range cfg.ProcessNames {
+		if name = strings.TrimSpace(name); name != "" {
+			firstConfigured = name
+			break
+		}
+	}
+	commandFallback := ""
+	for _, field := range strings.Fields(cfg.Command) {
+		field = strings.Trim(field, "'\"")
+		if field == "" || strings.Contains(field, "=") {
+			continue
+		}
+		commandName := filepath.Base(field)
+		if commandFallback == "" {
+			commandFallback = commandName
+		}
+		for _, name := range cfg.ProcessNames {
+			if strings.TrimSpace(name) == commandName {
+				return []string{commandName}
+			}
+		}
+	}
+	if firstConfigured != "" {
+		return []string{firstConfigured}
+	}
+	if commandFallback != "" {
+		return []string{commandFallback}
+	}
+	return nil
+}
+
+func processTargetIncludesName(target runtime.ProcessTarget, name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for _, candidate := range target.ProcessNames {
+		if strings.TrimSpace(candidate) == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) now() time.Time {
@@ -987,7 +1048,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		// Start the runtime session. Refuse to start if a prior escaped process
 		// for this session could not be confirmed dead: a survivor would race
 		// the replacement for the same work bead (duplicate bd close).
-		if orphanErr := m.killExistingOrphans(ctx, b.ID); orphanErr != nil {
+		if orphanErr := m.killExistingOrphans(ctx, b.ID, cfg); orphanErr != nil {
 			if rbErr := rollbackFailedCreate(); rbErr != nil {
 				return errors.Join(fmt.Errorf("pre-start orphan cleanup: %w", orphanErr), rbErr)
 			}

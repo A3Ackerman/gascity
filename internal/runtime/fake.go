@@ -551,52 +551,72 @@ func (f *Fake) ListRunning(prefix string) ([]string, error) {
 	return names, nil
 }
 
-// FindRuntimesBySessionID returns fake tracked and orphaned runtimes matching
-// a GC_SESSION_ID. Empty id returns all runtimes with a session ID.
-func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
+// FindRuntimes returns fake tracked and orphaned runtimes matching target.
+func (f *Fake) FindRuntimes(target ProcessTarget) ([]LiveRuntime, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Calls = append(f.Calls, Call{Method: "FindRuntimesBySessionID", Name: id})
+	f.Calls = append(f.Calls, Call{Method: "FindRuntimes", Name: target.SessionID})
 	if f.broken {
-		return nil, fmt.Errorf("finding runtimes for session %q: session unavailable", id)
+		return nil, fmt.Errorf("finding runtimes for session %q: session unavailable", target.SessionID)
 	}
 
 	var out []LiveRuntime
-	for sid, runtime := range f.OrphanedRuntimes {
-		sessionID := runtime.SessionID
-		if sessionID == "" {
-			sessionID = sid
+	for sid, live := range f.OrphanedRuntimes {
+		if live.SessionID == "" && live.Alias == "" {
+			live.SessionID = sid
 		}
-		if sessionID == "" {
+		if !liveRuntimeMatchesTarget(live, target) {
 			continue
 		}
-		if id != "" && sessionID != id {
-			continue
-		}
-		runtime.SessionID = sessionID
-		runtime.IsTracked = false
-		out = append(out, runtime)
+		live.IsTracked = false
+		out = append(out, live)
 	}
 	for name, cfg := range f.sessions {
-		sessionID := cfg.Env["GC_SESSION_ID"]
-		if sessionID == "" {
-			continue
-		}
-		if id != "" && sessionID != id {
-			continue
-		}
 		city := cfg.Env["GC_CITY_PATH"]
 		if city == "" {
 			city = cfg.Env["GC_CITY"]
 		}
-		out = append(out, LiveRuntime{
-			SessionID:    sessionID,
+		live := LiveRuntime{
+			SessionID:    cfg.Env["GC_SESSION_ID"],
+			Alias:        cfg.Env["GC_ALIAS"],
 			City:         city,
+			WorkDir:      cfg.WorkDir,
 			ProviderName: name,
 			IsTracked:    true,
-		})
+		}
+		if len(cfg.ProcessNames) > 0 {
+			live.ProcessName = cfg.ProcessNames[0]
+		}
+		if liveRuntimeMatchesTarget(live, target) {
+			out = append(out, live)
+		}
 	}
 	return out, nil
+}
+
+func liveRuntimeMatchesTarget(live LiveRuntime, target ProcessTarget) bool {
+	if target.SessionID == "" && target.Alias == "" && len(target.ProcessNames) == 0 {
+		return live.SessionID != ""
+	}
+	if target.SessionID != "" && live.SessionID == target.SessionID {
+		return true
+	}
+	if live.SessionID != "" {
+		return false
+	}
+	if target.WorkDir == "" || live.WorkDir != target.WorkDir {
+		return false
+	}
+	aliasesCompatible := target.Alias == "" || live.Alias == "" || target.Alias == live.Alias
+	if !aliasesCompatible {
+		return false
+	}
+	for _, name := range target.ProcessNames {
+		if name != "" && live.ProcessName == name {
+			return true
+		}
+	}
+	return false
 }
 
 // TerminateRuntime records a process-table termination and removes the fake

@@ -88,11 +88,11 @@ func newProcessTableSweepProvider(runtimes ...runtime.LiveRuntime) *processTable
 	}
 }
 
-func (p *processTableSweepProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
-	if id != "" {
+func (p *processTableSweepProvider) FindRuntimes(target runtime.ProcessTarget) ([]runtime.LiveRuntime, error) {
+	if target.SessionID != "" {
 		var filtered []runtime.LiveRuntime
 		for _, live := range p.runtimes {
-			if live.SessionID == id {
+			if live.SessionID == target.SessionID {
 				filtered = append(filtered, live)
 			}
 		}
