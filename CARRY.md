@@ -52,6 +52,7 @@ and the behavior check.
 | Navigator contract | 73d410d71, 0cdd157f7 | Stable navigator classification fields and regenerated API/dashboard clients. | Upstream exposes the same wire contract. |
 | Bundled pack pin | 6b747120d, fe59ba7c0 | Canonical core/bd pin names a real carry commit containing current embedded pack content. | Re-pin whenever current carry pack content changes. |
 | Beads schema pin | see "Beads pin" below | `go.mod` requires beads at the town's schema-v54 revision instead of upstream's v1.1.0-era pin. | Upstream's pin reaches the revision the fleet's `bd` runs — then take upstream's line unmodified. |
+| Cross-city mail (upstream #5386, ga-d755oq) | `3a8c37580` (fork PR #3) | `gc --context <peer> mail send / reply / inbox` routed to a REMOTE city over the control plane (`cmd/gc/mail_remote.go`, `api.Client.SendMail/ReplyMail/ListMailInboxPage`). Originally carried on this box as `84acc9794` cherry-picked from upstream `cdcd0611c1` (gastownhall/gascity PR #5386). That local copy proved BYTE-IDENTICAL to fork-PR #3's `3a8c37580` — same `git patch-id` `087346b84633ab5aeaee0340744f14b7745b8b53` — and was dropped as a duplicate when the deploy lineage was reconciled onto `origin/carry/operational` (ga-33s83a). The distinction an earlier draft of this row drew between the two copies is not a real one. | Upstream merges #5386 — the range-diff then absorbs it; take upstream's line unmodified. |
 
 ## Beads pin — the fleet contract
 
@@ -128,6 +129,75 @@ building whatever revision that checkout happens to be on — and `go build` wil
 not say so. `go list -m github.com/steveyegge/beads` reports the local directory
 instead of the pinned pseudo-version; that is the check. Delete `go.work` before
 producing a deploy candidate.
+
+### Correction: schema slot 0054 is forked (ga-grjijl, measured 2026-08-21)
+
+**The section above assumes there is exactly one migration numbered 0054. There
+are two, and this city's databases do not all carry upstream's.** Everything
+below is measured, not inferred; the recipe to re-measure is at the end.
+
+`schema_migrations` stores `(version, content_hash)` where `content_hash` is the
+sha256 of that migration's `.up.sql`. Two different migrations occupy slot 0054:
+
+| | file | sha256 of `.up.sql` | adds |
+|---|---|---|---|
+| carry | `0054_add_gc_route_index.up.sql` | `05085d4c…d66cc` | `issues.gc_routed_to_hash` + its index |
+| upstream `67652d8b5caf` | `0054_add_lease_columns.up.sql` | `2e51058b…1680` | `lease_expires_at`, `heartbeat_at`, `row_lock` |
+
+Control: version **53** hashes identically on both sides
+(`f13909f0…cbcb330`), which proves the hashing method and isolates the fork to
+slot 0054 exactly.
+
+State of this city's live databases (dolt `127.0.0.1:51361`, 2026-08-21 15:40 PDT):
+
+| DB | recorded v54 hash | lease columns | `gc_routed_to_hash` |
+|---|---|---|---|
+| `hq` (city beads: every `ga-` bead, all mail, all wisps) | carry `05085d4c` | **0** | 1 |
+| `qcore` | upstream `2e51058b` | 3 | 1 |
+| `as` | carry `05085d4c` | **0** | 1 |
+
+**Consequence for the pin above.** In beads `67652d8b5caf` the lease columns are
+not dormant: `internal/storage/issueops/update.go` appends `row_lock = ?` to the
+SET list of *every* mutating path, unconditionally, outside any branch — the
+comment there calls it "the 'every mutating path writes row_lock' invariant".
+A `gc` built from the committed pin, writing any bead in `hq`, therefore emits
+`UPDATE issues SET …, row_lock = ? WHERE id = ?` against a table with no such
+column. Verified read-only against the live server:
+
+    hq:    select row_lock from issues limit 1
+           -> Error 1105: column "row_lock" could not be found in any table in scope
+    qcore: select row_lock from issues limit 1  -> 0        (control: probe is valid)
+    hq:    select gc_routed_to_hash from issues limit 1 -> NULL  (control: query path works)
+
+So the sentence above — "a `gc` pinned **below** the schema `bd` has written
+trips beads' schema-skew gate … everything keeps working, slower and
+differently" — does not describe this city. There is no graceful degradation
+here: `hq` writes fail outright.
+
+**`qcore` is a second, quieter problem.** It physically carries *both* 0054s'
+columns but its ledger records only upstream's hash. Carry's 0054 probes
+`INFORMATION_SCHEMA` before altering, so it applied its column and left no
+ledger row. In `qcore`, `(version, content_hash)` no longer describes the
+physical schema — and it is wrong in the reassuring direction.
+
+**What this box does about it, until ga-grjijl is resolved.** The committed
+`go.mod` pin stays exactly as upstream set it — it is the fleet contract and it
+passes `check-gomod-replace` and `TestBeadsModulePin`. This machine holds the
+carry beads revision through the untracked per-machine `go.work` override that
+`.gitignore` already contemplates, so builds in `~/gascity-src` link the beads
+whose 0054 matches `hq` and `as`. Do **not** "fix" a build here by deleting
+`go.work` to match the contract; that is the hazard, not the cure.
+
+**The real fix is a fleet `bd` upgrade, not a `go.mod` edit** — rebase the beads
+carry commits onto `67652d8b5caf`, renumber the route-index migration off slot
+0054, migrate `hq`/`as`, reconcile `qcore`'s ledger, and redeploy `bd`
+everywhere in one window. Tracked on ga-grjijl.
+
+Re-measure before acting; other agents write these databases:
+
+    gc dolt sql -q "use hq; select version, content_hash from schema_migrations where version=54"
+    gc dolt sql -q "select count(*) from information_schema.columns where table_schema='hq' and table_name='issues' and column_name in ('lease_expires_at','heartbeat_at','row_lock')"
+    shasum -a 256 /Users/cherub/beads-src/internal/storage/schema/migrations/0054_add_gc_route_index.up.sql
 
 ## Deploy recipe
 
