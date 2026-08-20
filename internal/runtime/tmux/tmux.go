@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -593,42 +594,20 @@ const processKillGracePeriod = 2 * time.Second
 const processExitCheckInterval = 25 * time.Millisecond
 
 // liveTmuxServerPIDs returns the PIDs of every running tmux SERVER process on
-// this host.
+// this host, keyed as strings for the pid-string kill paths in this package.
 //
-// A tmux server is identified by three properties together, which is what
-// separates it from a transient tmux CLIENT carrying identical argv: its
-// command is a tmux invocation, it is its own process-group leader (the server
-// setsid()s when it daemonizes), and it has been reparented to init. A client
-// that merely asks an existing server to do something is a short-lived child of
-// gc and matches none of the last two.
-//
-// It deliberately enumerates servers on ALL sockets rather than resolving one
-// socket's server via `tmux -L <socket> display -p '#{pid}'`. The authoritative
-// per-socket lookup needs a socket name, and the deepest kill paths
-// (terminateProcesses and below) do not have one; enumerating is also strictly
-// safer, since it protects a neighbouring city's server too. Failure to run ps
-// returns nil, which degrades to the previous unguarded behavior rather than
-// blocking a kill.
+// The detection itself lives in proctable, which owns both reading the process
+// table and KillByPID — the OTHER kill family, and the one that actually took
+// the city down (hq-nie0). Keeping one detector rather than two means the two
+// kill paths cannot drift apart on what counts as a server.
 func liveTmuxServerPIDs() map[string]bool {
-	out, err := exec.Command("ps", "-axo", "pid=,ppid=,pgid=,command=").Output()
-	if err != nil {
+	pids := proctable.LiveTmuxServerPIDs()
+	if pids == nil {
 		return nil
 	}
-	servers := make(map[string]bool)
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-		pid, ppid, pgid := fields[0], fields[1], fields[2]
-		command := strings.Join(fields[3:], " ")
-		if pid != pgid || ppid != "1" {
-			continue
-		}
-		if !isTmuxServerCommand(command) {
-			continue
-		}
-		servers[pid] = true
+	servers := make(map[string]bool, len(pids))
+	for pid := range pids {
+		servers[strconv.Itoa(pid)] = true
 	}
 	return servers
 }
@@ -636,18 +615,10 @@ func liveTmuxServerPIDs() map[string]bool {
 // isTmuxServerCommand reports whether a process command line is a tmux
 // invocation. The tmux server keeps the argv of whatever invocation founded it,
 // so this matches `tmux -u -L <socket> new-session ...` as readily as a bare
-// `tmux`; the daemon-shape checks in liveTmuxServerPIDs are what make the
-// combination specific to a server.
+// `tmux`; the daemon-shape checks in proctable.LiveTmuxServerPIDs are what make
+// the combination specific to a server.
 func isTmuxServerCommand(command string) bool {
-	command = strings.TrimSpace(command)
-	if command == "" {
-		return false
-	}
-	binary := command
-	if idx := strings.IndexByte(binary, ' '); idx >= 0 {
-		binary = binary[:idx]
-	}
-	return filepath.Base(binary) == "tmux"
+	return proctable.IsTmuxServerCommand(command)
 }
 
 // terminateProcesses signals a set of processes, NEVER including a tmux server.
@@ -661,12 +632,20 @@ func isTmuxServerCommand(command string) bool {
 // the only session whose teardown operates on the process that is also the
 // server. Killing the mayor killed all ~15 sessions in the city, three times.
 //
-// The guard sits here, at the single choke point every kill path funnels
-// through, rather than in the four Kill* entry points. Which code path reaches
-// the server was never identified — the process-group hypothesis was measured
-// dead — so an exclusion that depends on identifying the path would not close
-// it. Refusing to signal a server is correct for every caller regardless of how
-// the PID got into the list, including callers written later.
+// The guard sits here rather than in the four Kill* entry points, because
+// refusing to signal a server is correct for every caller regardless of how the
+// PID got into the list, including callers written later.
+//
+// CORRECTION (hq-nie0): this was originally described as "the single choke
+// point every kill path funnels through". That is FALSE, and believing it is
+// what let the outage recur. terminateProcesses has eight call sites, ALL of
+// them in this file. There is a second, entirely separate kill family —
+// proctable.KillByPID, reached from Provider.TerminateRuntime below and from
+// internal/runtime/subprocess — which never touches terminateProcesses. The
+// city was lost again through THAT path, guarded here and unguarded there.
+// proctable.KillByPID now carries its own server refusal and its own wiring
+// test; if a third kill path is ever added, it needs one too.
+//
 // tmuxServerPIDsFn and killSignalFn are indirected so a test can prove the
 // guard is actually WIRED INTO terminateProcesses, not merely that the policy
 // function works in isolation. A guard that is correct but unreferenced is the

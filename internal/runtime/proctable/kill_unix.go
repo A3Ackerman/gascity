@@ -5,11 +5,22 @@ package proctable
 import (
 	"errors"
 	"fmt"
+	"os"
 	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+)
+
+// tmuxServerPIDsFn and killSyscallFn are indirected so a test can prove the
+// tmux-server guard below is actually WIRED INTO KillByPID, not merely that the
+// policy function works in isolation. A guard that is correct but unreferenced
+// is precisely the failure mode that let hq-nie0 recur: ga-03ixvj's guard was
+// real, tested, and installed on a DIFFERENT kill path than the one that fired.
+var (
+	tmuxServerPIDsFn = LiveTmuxServerPIDs
+	killSyscallFn    = syscall.Kill
 )
 
 // KillByPID terminates pid with SIGTERM, then SIGKILL after
@@ -20,6 +31,34 @@ import (
 // under I/O) yields an error so callers can refuse to start a name-reused
 // replacement that would race it for the same work.
 func KillByPID(pid int) error {
+	// NEVER signal a tmux server. One socket = one server = every session in
+	// the city, so killing it is a whole-city outage (hq-nie0 / ga-03ixvj).
+	//
+	// The scan-side exclusion in scan_darwin.go / scan_linux.go is the class
+	// fix and should mean the server never reaches this function at all. This
+	// is the second layer, and it is here specifically because the first
+	// attempt at this bug guarded terminateProcesses in the tmux package --
+	// described in its own comment as "the single choke point every kill path
+	// funnels through", which is not true. terminateProcesses has eight call
+	// sites, all inside internal/runtime/tmux/tmux.go. KillByPID is a separate
+	// kill family reached from tmux.Provider.TerminateRuntime and from
+	// subprocess, and it is the one the outage came through. A guard on one
+	// family says nothing about the other.
+	//
+	// Refusing returns SUCCESS, not an error. A tmux server is not an agent
+	// process and cannot race a replacement for the same work, so there is no
+	// orphan here to fail a Start over -- and returning an error would wedge
+	// every mayor restart forever, trading an outage for a different outage.
+	//
+	// Every refusal prints. This should fire approximately never, so if it
+	// does, whoever reads that log is watching a live kill path that still
+	// surfaces the server as a target and needs to know which PID was spared.
+	if pid > 1 && tmuxServerPIDsFn()[pid] {
+		fmt.Fprintf(os.Stderr,
+			"proctable: REFUSING to kill PID %d — it is a tmux server, not a session process. "+
+				"Killing it would take down every session on that socket (hq-nie0).\n", pid)
+		return nil
+	}
 	// Capture the target's start-time identity BEFORE signaling. During the
 	// post-SIGKILL reap wait the PID can be reaped and recycled to an unrelated
 	// process; without this, a recycled PID reads as "still alive" and we would
@@ -30,7 +69,7 @@ func KillByPID(pid int) error {
 	startTime, _ := pidutil.StartTime(pid)
 	return killByPID(
 		pid,
-		syscall.Kill,
+		killSyscallFn,
 		pidAlive,
 		func(p int) bool { return pidutil.AliveWithStartTime(p, startTime) },
 		runtime.ManagedProcessStopGrace,
