@@ -1281,6 +1281,17 @@ func (m *Manager) Suspend(id string) error {
 
 // RequestFreshRestart marks a session for a controller-owned fresh restart
 // without closing its bead or clearing resume metadata immediately.
+// RequestFreshRestart asks the controller to restart a session with fresh
+// provider conversation state.
+//
+// It records the intent only. Rotation belongs to whichever start path picks
+// the session up, because this is NOT the only way a reset is requested: the
+// reconciler writes the same continuation_reset_pending marker directly when it
+// processes restart_requested, never routing through here. Rotating at request
+// time would therefore rotate on this path and not on that one. Every start
+// path consumes the marker exactly once instead (preWakeCommit for the
+// controller, commitPendingContinuationReset for Submit/Send/Attach/Start), so
+// the epoch advances once per reset however the reset was asked for.
 func (m *Manager) RequestFreshRestart(id string) error {
 	return withSessionMutationLock(id, func() error {
 		if _, _, err := m.sessionBead(id); err != nil {
