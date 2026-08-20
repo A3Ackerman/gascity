@@ -33,10 +33,7 @@ func IsScanRoot(pid int) bool {
 	if pid == 1 {
 		return true
 	}
-	if pid <= 0 {
-		return false
-	}
-	if pid == os.Getpid() {
+	if pid <= 0 || pid == os.Getpid() || isInfrastructureProcess(scanRoot, pid) {
 		return false
 	}
 	env, err := parseEnvironFile(filepath.Join(scanRoot, strconv.Itoa(pid), "environ"))
@@ -66,7 +63,14 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 			continue
 		}
 		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 1 {
+		// Never report an infrastructure process (a tmux server) as an agent
+		// root. Linux reads /proc/<pid>/environ, so it does not suffer darwin's
+		// argv/env conflation and the server carries no GC_SESSION_ID here —
+		// but `isRootWithSessionID` treats ANY process with ppid <= 1 as a
+		// root, so the exclusion is kept in parity with darwin rather than
+		// relying on that distinction holding. See scan_darwin.go for the
+		// outage this closes (hq-nie0 / ga-03ixvj).
+		if err != nil || pid <= 1 || isInfrastructureProcess(root, pid) {
 			continue
 		}
 		env, err := parseEnvironFile(filepath.Join(root, entry.Name(), "environ"))
@@ -169,13 +173,13 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureParent(root, ppid) {
+	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureProcess(root, ppid) {
 		return true, nil
 	}
 	return parentEnv["GC_SESSION_ID"] != sessionID, nil
 }
 
-func isInfrastructureParent(root string, pid int) bool {
+func isInfrastructureProcess(root string, pid int) bool {
 	data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "comm"))
 	if err != nil {
 		return false

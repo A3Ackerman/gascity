@@ -23,9 +23,39 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
+	return scanDarwinRecords(records, id), nil
+}
+
+// scanDarwinRecords selects the agent roots matching id from an already-read
+// process table. It is split out of ScanBySessionID so the selection policy —
+// in particular the infrastructure exclusion below, which is load-bearing
+// against a whole-city outage — is testable against a fixture instead of
+// requiring a live `ps` and a live tmux server.
+func scanDarwinRecords(records map[int]psRecord, id string) []runtime.LiveRuntime {
 	var out []runtime.LiveRuntime
 	for _, record := range records {
-		if record.pid <= 1 {
+		// Exclude infrastructure processes from being reported as agent roots
+		// at all. This is the fix for the hq-nie0 / ga-03ixvj whole-city
+		// outage, and on darwin it is the ONLY thing that closes it.
+		//
+		// A tmux server has no GC_SESSION_ID in its real environment — but
+		// `ps eww` prints argv and env concatenated into one field, and the
+		// server permanently retains the argv of the `new-session` that
+		// founded it, which carries `-e GC_SESSION_ID=<mayor session>` flag
+		// values. parseInlineEnv cannot tell a `KEY=VALUE` that is an
+		// environment entry from one that is a `-e` flag argument, so the
+		// server READS as a process in the mayor's session. Measured on the
+		// live server: exactly one `GC_SESSION_ID=` in the full `ps -Eww`
+		// output, at byte offset 1561, inside an argv region that ends at
+		// ~4030 — i.e. in argv, never in env.
+		//
+		// That misreading is why scrubbing the environment cannot fix this:
+		// there is nothing in the environment to scrub. The server's parent is
+		// launchd, so the parent-dedup below never fires either, and once the
+		// mayor's tmux SESSION is gone (post-handoff) IsTracked is false and
+		// the server is killed as an orphan — taking every session on the
+		// socket with it. One socket = one server = the whole city.
+		if record.pid <= 1 || isInfrastructureCommand(record.command) {
 			continue
 		}
 		sessionID := record.env["GC_SESSION_ID"]
@@ -56,7 +86,7 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if out == nil {
 		out = []runtime.LiveRuntime{}
 	}
-	return out, nil
+	return out
 }
 
 // IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
@@ -79,7 +109,9 @@ func IsScanRoot(pid int) bool {
 		return false
 	}
 	record, ok := records[pid]
-	if !ok {
+	// Same infrastructure exclusion as scanDarwinRecords: a tmux server must
+	// never be classified as an agent root (see the note there).
+	if !ok || isInfrastructureCommand(record.command) {
 		return false
 	}
 	sessionID := record.env["GC_SESSION_ID"]
