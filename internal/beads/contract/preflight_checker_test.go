@@ -487,6 +487,16 @@ func TestCheckVersionCompatSourceBuild(t *testing.T) {
 		{"confirmed version mismatch still fails", "1.0.5", validCtx("1.0.4"), PreflightCheckFail},
 		{"matching versions pass", "1.0.5", validCtx("1.0.5"), PreflightCheckPass},
 		{"missing bd version is unconfirmable — warn", "1.0.5", validCtx(""), PreflightCheckWarn},
+		// Same-commit-different-label cases (the westeros defect): a
+		// module-installed bd reports the Go pseudo-version while a local source
+		// build of the SAME commit reports a short tag. Neither label string
+		// matches, but the embedded commit does, so the schema (already
+		// validated) governs and the native store stays up.
+		{"same commit, pseudo-version lib vs tag bd — pass", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 (67652d8b5caf)"), PreflightCheckPass},
+		{"same commit, both pseudo-version — pass", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.1-0.20260716185344-67652d8b5caf"), PreflightCheckPass},
+		{"same commit, @-descriptor bd — pass", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 dev: main@67652d8b5caf"), PreflightCheckPass},
+		{"different commit embedded — still fails", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 (deadbeebabe)"), PreflightCheckFail},
+		{"label mismatch, no commit on bd side — fails (no parse guess)", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.0.4"), PreflightCheckFail},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -499,5 +509,29 @@ func TestCheckVersionCompatSourceBuild(t *testing.T) {
 				t.Fatalf("state = %q, want %q (summary: %q)", got.State, tt.want, got.Summary)
 			}
 		})
+	}
+}
+
+// TestCommitOf pins the version-label commit extraction: pseudo-versions,
+// parenthesized descriptors, and @-descriptors yield the embedded commit;
+// plain semver and non-hex tokens yield "".
+func TestCommitOf(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"1.1.1-0.20260716185344-67652d8b5caf", "67652d8b5caf"},
+		{"v1.1.1-0.20260716185344-67652d8b5caf", "67652d8b5caf"},
+		{"1.1.0 (67652d8b5caf)", "67652d8b5caf"},
+		{"1.1.0 dev: main@67652d8b5caf", "67652d8b5caf"},
+		{"1.0.4", ""},
+		{"1.1.0-beta", ""},         // "beta" is not hex
+		{"1.1.0 (notacommit)", ""}, // non-hex descriptor
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := commitOf(tc.in); got != tc.want {
+			t.Errorf("commitOf(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

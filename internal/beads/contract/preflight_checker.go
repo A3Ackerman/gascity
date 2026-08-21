@@ -277,10 +277,65 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 		// mismatch (below) should.
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version unconfirmed (source build)", details)
 	}
-	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
+	bdVersion := strings.TrimPrefix(ctx.BDVersion, "v")
+	if bdVersion != libraryVersion {
+		// The label strings differ, but labels are not the compatibility signal:
+		// two builds of the SAME source commit carry different labels depending on
+		// build path (a module-installed bd reports the Go pseudo-version
+		// "1.1.1-0.20260716185344-67652d8b5caf"; a local source build reports a
+		// short tag like "1.1.0"). When both labels embed the same commit hash the
+		// binaries are built from identical source and the schema version (already
+		// validated above) is the real signal — passing here generalizes the
+		// source-build escape above instead of gating the native store on a build
+		// label. westeros hit exactly this: laptop and box bd are the same commit
+		// (67652d8b) but the labels differed, tripping native_store_unavailable.
+		if commitOf(bdVersion) != "" && commitOf(bdVersion) == commitOf(libraryVersion) {
+			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and linked beads library built from the same commit ("+commitOf(bdVersion)+"); schema compatible despite differing version labels", details)
+		}
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd version differs from linked beads library version", details)
 	}
 	return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and linked beads library versions match", details)
+}
+
+// commitOf extracts the source-control commit hash embedded in a version label.
+// It recognizes the two forms beads/gc binaries actually carry:
+//   - Go module pseudo-versions: "v1.1.1-0.20260716185344-67652d8b5caf" — the
+//     trailing segment after the last "-" is the abbreviated commit.
+//   - Parenthesized commit descriptors: "1.1.0 (67652d8b5caf)" or a "dev:
+//     main@67652d8b5caf" form — the hex token after "(" or "@".
+//
+// Returns "" when no commit-shaped token is present, so callers only equate
+// versions on positive commit evidence and never on a parse guess.
+func commitOf(version string) string {
+	// Parenthesized / @-separated descriptor: "1.1.0 (67652d8b5caf)", "dev: main@67652d8b5caf".
+	if i := strings.LastIndexAny(version, "(@"); i >= 0 {
+		if c := trimCommitToken(version[i+1:]); c != "" {
+			return c
+		}
+	}
+	// Go pseudo-version: commit is the segment after the last "-".
+	if i := strings.LastIndexByte(version, '-'); i >= 0 {
+		if c := trimCommitToken(version[i+1:]); c != "" {
+			return c
+		}
+	}
+	return ""
+}
+
+// trimCommitToken normalizes a candidate commit token: strips a trailing ")",
+// and returns the token only if it is a plausible hex commit hash (7-40 hex
+// chars). Anything else returns "".
+func trimCommitToken(s string) string {
+	s = strings.TrimSuffix(strings.TrimSpace(s), ")")
+	if len(s) < 7 || len(s) > 40 {
+		return ""
+	}
+	for _, r := range s {
+		if ('0' > r || r > '9') && ('a' > r || r > 'f') && ('A' > r || r > 'F') {
+			return ""
+		}
+	}
+	return strings.ToLower(s)
 }
 
 func (c PreflightChecker) checkContractShape(metadata preflightMetadata) PreflightCheckResult {
