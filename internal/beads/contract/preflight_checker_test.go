@@ -495,6 +495,12 @@ func TestCheckVersionCompatSourceBuild(t *testing.T) {
 		{"same commit, pseudo-version lib vs tag bd — pass", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 (67652d8b5caf)"), PreflightCheckPass},
 		{"same commit, both pseudo-version — pass", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.1-0.20260716185344-67652d8b5caf"), PreflightCheckPass},
 		{"same commit, @-descriptor bd — pass", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 dev: main@67652d8b5caf"), PreflightCheckPass},
+		// The exact westeros pair: gc links the pseudo-version; the box bd is a
+		// source build whose label is "1.1.0 (dev: 67652d8b5caf)". The commit is
+		// behind a "dev: " prefix — this is the label form the original
+		// delimiter-keyed commitOf missed (syl, qc-04ff7.18).
+		{"same commit, pseudo-version lib vs (dev: hex) bd — pass (westeros)", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 (dev: 67652d8b5caf)"), PreflightCheckPass},
+		{"bd reports (dev) with no commit — fails, no parse guess", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 (dev)"), PreflightCheckFail},
 		{"different commit embedded — still fails", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 (deadbeebabe)"), PreflightCheckFail},
 		{"label mismatch, no commit on bd side — fails (no parse guess)", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.0.4"), PreflightCheckFail},
 	}
@@ -524,7 +530,9 @@ func TestCommitOf(t *testing.T) {
 		{"v1.1.1-0.20260716185344-67652d8b5caf", "67652d8b5caf"},
 		{"1.1.0 (67652d8b5caf)", "67652d8b5caf"},
 		{"1.1.0 dev: main@67652d8b5caf", "67652d8b5caf"},
+		{"1.1.0 (dev: 67652d8b5caf)", "67652d8b5caf"}, // westeros box bd source-build label (syl, qc-04ff7.18)
 		{"1.0.4", ""},
+		{"1.1.0 (dev)", ""},        // bd --version double-dash: no commit at all
 		{"1.1.0-beta", ""},         // "beta" is not hex
 		{"1.1.0 (notacommit)", ""}, // non-hex descriptor
 		{"", ""},

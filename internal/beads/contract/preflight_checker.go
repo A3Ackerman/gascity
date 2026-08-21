@@ -298,35 +298,44 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 }
 
 // commitOf extracts the source-control commit hash embedded in a version label.
-// It recognizes the two forms beads/gc binaries actually carry:
+// It scans every token in the label and returns the first plausible commit hash,
+// which covers the forms beads/gc binaries actually carry:
 //   - Go module pseudo-versions: "v1.1.1-0.20260716185344-67652d8b5caf" — the
 //     trailing segment after the last "-" is the abbreviated commit.
-//   - Parenthesized commit descriptors: "1.1.0 (67652d8b5caf)" or a "dev:
-//     main@67652d8b5caf" form — the hex token after "(" or "@".
+//   - Parenthesized / dev descriptors: "1.1.0 (67652d8b5caf)", "1.1.0 (dev:
+//     67652d8b5caf)", "1.1.0 dev: main@67652d8b5caf" — the hex token inside the
+//     descriptor, with any "dev:"/"main@"/etc. prefix stripped by the token scan.
+//
+// Scanning tokens rather than keying on a single delimiter matters: the
+// source-build label "1.1.0 (dev: 67652d8b5caf)" carries the commit AFTER a
+// "dev: " prefix, so a parser that stops at the "(" and hex-validates the rest
+// rejects the whole label and never reaches the commit (the westeros miss).
 //
 // Returns "" when no commit-shaped token is present, so callers only equate
 // versions on positive commit evidence and never on a parse guess.
 func commitOf(version string) string {
-	// Parenthesized / @-separated descriptor: "1.1.0 (67652d8b5caf)", "dev: main@67652d8b5caf".
-	if i := strings.LastIndexAny(version, "(@"); i >= 0 {
-		if c := trimCommitToken(version[i+1:]); c != "" {
-			return c
-		}
-	}
-	// Go pseudo-version: commit is the segment after the last "-".
-	if i := strings.LastIndexByte(version, '-'); i >= 0 {
-		if c := trimCommitToken(version[i+1:]); c != "" {
+	for _, tok := range strings.FieldsFunc(version, commitTokenSep) {
+		if c := trimCommitToken(tok); c != "" {
 			return c
 		}
 	}
 	return ""
 }
 
-// trimCommitToken normalizes a candidate commit token: strips a trailing ")",
-// and returns the token only if it is a plausible hex commit hash (7-40 hex
-// chars). Anything else returns "".
+// commitTokenSep splits a version label into candidate tokens on every
+// delimiter that can precede or follow an embedded commit: whitespace and the
+// punctuation in pseudo-versions and descriptors ("-", "(", ")", "@", ":").
+func commitTokenSep(r rune) bool {
+	switch r {
+	case ' ', '\t', '-', '(', ')', '@', ':':
+		return true
+	}
+	return false
+}
+
+// trimCommitToken returns the token only if it is a plausible hex commit hash
+// (7-40 hex chars). Anything else returns "".
 func trimCommitToken(s string) string {
-	s = strings.TrimSuffix(strings.TrimSpace(s), ")")
 	if len(s) < 7 || len(s) > 40 {
 		return ""
 	}
