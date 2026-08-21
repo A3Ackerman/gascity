@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -2938,13 +2939,38 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// or an unrelated restart). ga-9n5hj: the 2026-07-18
 						// crash was an FPExtra-only wave force-restarting the
 						// whole roster after guard expiry.
+						//
+						// CopyFiles-ONLY drift is also lazy, but is ACCEPTED IN
+						// PLACE (core baselines rebaselined) rather than skipped:
+						// a staged copy is never re-read by the running process,
+						// so the drain buys nothing and destroys context
+						// (hq-wi4ka, the 2026-08-20 fleet drain). Rebasing records
+						// that the copy refreshes at the next natural start. On a
+						// persist failure we fall THROUGH to the eager drain path
+						// so a transient store error never silently suppresses a
+						// real config change.
 						if configDriftLazyApplicable(driftedFields) {
-							if trace != nil {
-								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredLazy, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
-									"active_reason": "lazy_prompt_only",
-								}))
+							if configDriftCopyFilesOnly(driftedFields) {
+								acceptBatch, acceptErr := acceptCopyFilesDriftInPlace(id, sessFront, agentCfg)
+								if acceptErr == nil {
+									tick.apply(id, acceptBatch)
+									if trace != nil {
+										trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredLazy, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+											"active_reason": "lazy_copyfiles_inplace",
+										}))
+									}
+									fmt.Fprintf(stdout, "Accepted copy-files config drift in place for '%s' (applies at next start)\n", name) //nolint:errcheck
+									continue
+								}
+								fmt.Fprintf(stderr, "session reconciler: accepting copy-files drift in place for %s: %v; falling back to drain\n", name, acceptErr) //nolint:errcheck
+							} else {
+								if trace != nil {
+									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredLazy, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+										"active_reason": "lazy_prompt_only",
+									}))
+								}
+								continue
 							}
-							continue
 						}
 						fmt.Fprintf(stderr, "config-drift %s: stored=%s current=%s cmd=%q\n", name, truncateHashForLog(storedHash), truncateHashForLog(currentHash), agentCfg.Command) //nolint:errcheck
 						// Diagnostic: log per-field breakdown to identify the drifting field.
@@ -3047,6 +3073,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// aggregating refresh @~2710 today, but folding here future-proofs
 							// that refresh's retirement (STEP6-PREPASS-AUDIT group 10).
 							tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(infoByID[id], store, sp, name, alive, string(sessionpkg.StateStartPending), clk.Now().UTC(), stderr))
+							// Record a handoff BEFORE committing the restart so
+							// the rebuilt named session can recover its context
+							// (hq-wi4ka: config-drift restart with no handoff
+							// destroys the conversation). Best-effort.
+							sendConfigDriftHandoffMail(store, rec, tp.DisplayName(), stderr)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeRestartInPlace, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
 							}
@@ -3134,6 +3165,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								ddt = defaultDrainTimeout
 							}
 							if beginSessionDrainInfo(infoByID[id], sp, dt, "config-drift", clk, ddt) {
+								// Record a handoff BEFORE the drain so the rebuilt
+								// session can recover its context (hq-wi4ka). Best-effort.
+								sendConfigDriftHandoffMail(store, rec, tp.DisplayName(), stderr)
 								fmt.Fprintf(stdout, "Draining session '%s': config-drift\n", name) //nolint:errcheck
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDrain, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
@@ -4933,6 +4967,33 @@ func sendConfigDriftWaveMail(store beads.Store, rec events.Recorder, recipient, 
 	})
 }
 
+// sendConfigDriftHandoffMail records a durable handoff for a session about to
+// be recycled by config drift, so the conversation's context survives the
+// drain. Without it a config-drift restart is a kill+rematerialize with NO
+// handoff and the context is destroyed — the 2026-08-19/20 fleet drains
+// (hq-wi4ka) lost every crew session's context this way. The reconciler wires
+// the same auto-handoff path the PreCompact "context cycle" hook uses
+// (cmd_handoff.go createHandoffMail, labels gc:auto-handoff +
+// archive-after-inject): the mail is addressed to the session's own identity
+// so the rebuilt session picks its prior context up on wake.
+//
+// Best-effort: a mail failure logs to stderr and NEVER blocks or cancels the
+// drain — config-drift handling is a reconvergence restart, and failing to
+// record a handoff must not strand a drifted session running stale config.
+// recipient is the session's mail address (its alias/qualified name, matching
+// GC_ALIAS); it is skipped (no mail) when empty.
+func sendConfigDriftHandoffMail(store beads.Store, rec events.Recorder, recipient string, stderr io.Writer) {
+	if store == nil || recipient == "" {
+		return
+	}
+	// store doubles as the session-class store: in the reconciler both are the
+	// same object today (mirrors beadmail.New(store) == NewWithStores(store,
+	// store)), matching how createHandoffMail is invoked from gc handoff.
+	createHandoffMail(store, store, rec, controllerMailIdentity, recipient,
+		[]string{"HANDOFF: config-drift restart"}, "HANDOFF: config-drift restart",
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel, "priority:1"}, stderr)
+}
+
 const (
 	namedSessionActivityThreshold                      = 2 * time.Minute
 	namedSessionRecentActivityConfigDriftDeferralLimit = 30 * time.Second
@@ -5210,8 +5271,41 @@ func sessionConfigDriftKey(info sessionpkg.Info, cfg *config.City, tp TemplatePa
 // lazy — fingerprinted env keys (BEADS_DIR, GC_RIG, CLAUDE_CONFIG_DIR pins)
 // change where an agent reads work or which account it bills, and running
 // indefinitely on the old values is itself a hazard.
+//
+// The two fields share the "next cycle, nothing about the live process"
+// property but are applied differently (see the classification site):
+//   - FPExtra-only drift is SKIPPED: the stored hash is left stale so a
+//     concurrent eager change (command/env) keeps the mismatch visible and the
+//     drift re-evaluates each tick until a natural cycle picks the new prompt
+//     up. A prompt fragment never needs a restart to take effect.
+//   - CopyFiles-only drift is ACCEPTED IN PLACE: the core baselines are
+//     rebaselined (acceptCopyFilesDriftInPlace) because a staged copy is
+//     written into the session workDir before the process starts and is never
+//     re-read while it runs (internal/runtime/staging.go StageWorkDir). A
+//     CopyFiles-ONLY drift describes re-materializing staged content for the
+//     NEXT start, not a change to the live agent's behavior. The 2026-08-20
+//     fleet drain (hq-wi4ka) proved the eager path is catastrophic here: a
+//     one-line edit to a tracked script under <city>/scripts flipped all 14
+//     sessions' CopyFiles hash and drained the fleet with no handoff,
+//     destroying every conversation — to change a file no running session had
+//     open. Rebasing in place records that the copy refreshes at the next
+//     natural start and stops the drain without destroying context. Unlike
+//     FPExtra, CopyFiles sits in the PROVISION half (fingerprint_partition.go),
+//     so without an in-place accept the drift would otherwise force a full
+//     re-provision rebuild.
+//
+// Both stay narrow: drift in these fields combined with ANY other field keeps
+// the eager path, and non-listed fields are unaffected. Env remains eager.
 var configDriftLazyFields = map[string]bool{
-	"FPExtra": true,
+	"FPExtra":   true,
+	"CopyFiles": true,
+}
+
+// configDriftCopyFilesOnly reports whether the drift is exactly CopyFiles
+// (no other field). Such drift is accepted in place (rebaselined) rather than
+// skipped like FPExtra — see configDriftLazyFields.
+func configDriftCopyFilesOnly(driftedFields []string) bool {
+	return len(driftedFields) == 1 && driftedFields[0] == "CopyFiles"
 }
 
 // configDriftLazyApplicable reports whether ALL drifted fields are lazily
@@ -5836,6 +5930,53 @@ func sessionHashRebaselineMetadata(agentCfg runtime.Config) (map[string]string, 
 		"started_launch_hash":    runtime.LaunchFingerprint(agentCfg),
 		"core_hash_breakdown":    string(breakdownJSON),
 	}, nil
+}
+
+// copyFilesDriftRebaselineMetadata builds the rebaseline patch for a
+// CopyFiles-ONLY config drift accepted in place. Unlike
+// sessionHashRebaselineMetadata (the version-artifact path, where the config
+// did not actually change so every baseline moves), this moves ONLY the core
+// identity baselines — started_config_hash, started_provision_hash,
+// started_launch_hash, and core_hash_breakdown — and deliberately leaves
+// started_live_hash/live_hash untouched: a CopyFiles drift says nothing about
+// the live half, and moving the live baseline here would mask a concurrent
+// SessionLive change that the live-drift clause is responsible for
+// re-applying. The staged content itself is NOT re-copied (the running process
+// never re-reads it); the new content takes effect at the session's next
+// natural start, and rebaselining simply records that outcome so the
+// reconciler stops reporting drift for a change that requires no restart.
+func copyFilesDriftRebaselineMetadata(agentCfg runtime.Config) (map[string]string, error) {
+	breakdownJSON, err := json.Marshal(runtime.CoreFingerprintBreakdown(agentCfg))
+	if err != nil {
+		return nil, fmt.Errorf("marshaling core_hash_breakdown: %w", err)
+	}
+	return map[string]string{
+		"started_config_hash":    runtime.CoreFingerprint(agentCfg),
+		"started_provision_hash": runtime.ProvisionFingerprint(agentCfg),
+		"started_launch_hash":    runtime.LaunchFingerprint(agentCfg),
+		"core_hash_breakdown":    string(breakdownJSON),
+	}, nil
+}
+
+// acceptCopyFilesDriftInPlace rebaselines a CopyFiles-ONLY drift in place
+// instead of draining the session. Returns (patch, nil) on success so the
+// caller can fold it onto the typed snapshot (Step 6d write-returns-Info),
+// (nil, nil) when there is nothing to do (empty id / nil front-door), and
+// (nil, err) on persist failure — on failure the caller falls through to the
+// normal eager drain path so a transient store error never silently suppresses
+// a real config change.
+func acceptCopyFilesDriftInPlace(id string, sessFront *sessionpkg.Store, agentCfg runtime.Config) (map[string]string, error) {
+	if id == "" || sessFront == nil {
+		return nil, nil
+	}
+	patch, err := copyFilesDriftRebaselineMetadata(agentCfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := sessFront.ApplyPatch(id, patch); err != nil {
+		return nil, fmt.Errorf("accepting copy-files drift in place: %w", err)
+	}
+	return patch, nil
 }
 
 // silentRebaselineSessionHashes overwrites the four fingerprint metadata
