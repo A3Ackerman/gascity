@@ -45,6 +45,14 @@ node_modules/
 !/.claude/
 /.claude/*
 !/.claude/skills/
+# Tracked source skills (clean names like gascity-docs/) stay tracked. The gc
+# runtime injects per-session skill packs into the worktree under DOTTED names
+# (core.gc-mail, bridge.convoy-integration-branch-policy, studio.brief, ...)
+# plus a .gc-skill-ownership.json manifest; those are generated, not source,
+# and leaving them untracked-but-unignored flips git status --porcelain so
+# every build stamps -dirty. Match any skill entry whose name contains a dot.
+/.claude/skills/*.*
+/.claude/skills/.gc-skill-ownership.json
 
 # sync-project-agents writes local migration backups here; don't commit them.
 .agents/migration/
