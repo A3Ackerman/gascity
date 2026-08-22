@@ -2621,3 +2621,108 @@ func TestQualifiedName_WithBindingName(t *testing.T) {
 		})
 	}
 }
+
+// TestImport_MissingSharedCacheNamesRecordedCacheRoot is the loader half of the
+// qc-myfj1 regression. When a city's packs were installed under a different
+// repo cache root than the loading process resolves, the bare "locked but not
+// cached; run gc import install" is advice that cannot work — the install it
+// names writes into the root this process is not reading, so the operator loops
+// forever between a successful install and a failing reload. The error must
+// name both roots.
+func TestImport_MissingSharedCacheNamesRecordedCacheRoot(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	recorded := filepath.Join(dir, "data-gc-home", "cache", "repos")
+
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[imports.gastown]
+source = "https://github.com/example/gastown.git"
+version = "^1.2"
+`)
+	writeTestFile(t, cityDir, "packs.lock", `
+schema = 1
+
+[packs."https://github.com/example/gastown.git"]
+version = "1.2.3"
+commit = "abc123def456"
+fetched = "2026-04-10T00:00:00Z"
+`)
+	if err := WriteRepoCacheBinding(cityDir, recorded); err != nil {
+		t.Fatalf("WriteRepoCacheBinding: %v", err)
+	}
+
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err == nil {
+		t.Fatal("expected missing shared cache error")
+	}
+	active, rootErr := GlobalRepoCacheRoot()
+	if rootErr != nil {
+		t.Fatalf("GlobalRepoCacheRoot: %v", rootErr)
+	}
+	for _, want := range []string{"locked but not cached", recorded, active, "GC_HOME mismatch"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want it to mention %q", err, want)
+		}
+	}
+}
+
+// TestImport_MissingSharedCacheWithMatchingCacheRootIsUnannotated pins that the
+// annotation is scoped to a genuine split: a lock recorded against the active
+// root keeps the plain message.
+func TestImport_MissingSharedCacheWithMatchingCacheRootIsUnannotated(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[imports.gastown]
+source = "https://github.com/example/gastown.git"
+version = "^1.2"
+`)
+	active, err := GlobalRepoCacheRoot()
+	if err != nil {
+		t.Fatalf("GlobalRepoCacheRoot: %v", err)
+	}
+	writeTestFile(t, cityDir, "packs.lock", `
+schema = 1
+
+[packs."https://github.com/example/gastown.git"]
+version = "1.2.3"
+commit = "abc123def456"
+fetched = "2026-04-10T00:00:00Z"
+`)
+	if err := WriteRepoCacheBinding(cityDir, active); err != nil {
+		t.Fatalf("WriteRepoCacheBinding: %v", err)
+	}
+
+	_, _, err = LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err == nil {
+		t.Fatal("expected missing shared cache error")
+	}
+	if strings.Contains(err.Error(), "GC_HOME mismatch") {
+		t.Fatalf("error = %v, want no cache-root annotation when the roots agree", err)
+	}
+}

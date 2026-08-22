@@ -176,7 +176,7 @@ func resolveLockedRemoteImport(source, cityRoot string, nonBlocking bool) (strin
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit, nonBlocking); err != nil {
-		return "", false, err
+		return "", false, annotateCacheRootMismatch(err, cityRoot, cacheRoot)
 	}
 	return cacheDir, true, nil
 }
@@ -357,7 +357,7 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string, nonB
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit, nonBlocking); err != nil {
-		return "", err
+		return "", annotateCacheRootMismatch(err, cityRoot, cacheRoot)
 	}
 	return cacheDir, nil
 }
@@ -567,6 +567,20 @@ func RepoCacheKey(source, commit string) string {
 	}
 	sum := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%x", sum[:])
+}
+
+// annotateCacheRootMismatch appends the recorded-vs-active cache root to a
+// remote-import resolution failure. Without it a GC_HOME split presents as a
+// bare "locked but not cached; run gc import install" — advice that cannot
+// work, because the install it names writes into the very root this process is
+// not reading. Naming both roots turns that dead end into a one-line
+// diagnosis.
+func annotateCacheRootMismatch(err error, cityRoot, activeRoot string) error {
+	bound := ReadRepoCacheBinding(cityRoot)
+	if err == nil || SameRepoCacheRoot(bound, activeRoot) {
+		return err
+	}
+	return fmt.Errorf("%w; this city's packs were installed into repo cache root %s but this process resolves %s (GC_HOME mismatch)", err, bound, activeRoot)
 }
 
 // NormalizeRemoteSource extracts the clone URL from a source string,
