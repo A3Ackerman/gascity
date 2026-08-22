@@ -394,9 +394,7 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	})
 
 	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
-	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, cleanup.ID, body.ID, "blocks")
-	mustDepAdd(t, store, futureMember.ID, control.ID, "blocks")
 	mustDepAdd(t, store, futureControl.ID, futureMember.ID, "blocks")
 
 	result, err := ProcessControl(store, control, ProcessOptions{})
@@ -433,17 +431,155 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 			t.Fatalf("%s outcome = %q, want skipped", beadID, got)
 		}
 	}
-	memberDeps, err := store.DepList(futureMember.ID, "down")
+	controlDeps, err := store.DepList(futureControl.ID, "down")
 	if err != nil {
-		t.Fatalf("dep list future member: %v", err)
+		t.Fatalf("dep list future control: %v", err)
 	}
-	if len(memberDeps) != 1 || memberDeps[0].DependsOnID != control.ID || memberDeps[0].Type != "blocks" {
-		t.Fatalf("future member deps = %+v, want preserved block on %s", memberDeps, control.ID)
+	if len(controlDeps) != 1 || controlDeps[0].DependsOnID != futureMember.ID || controlDeps[0].Type != "blocks" {
+		t.Fatalf("future control deps = %+v, want preserved block on %s", controlDeps, futureMember.ID)
 	}
 
 	cleanupReady := mustReadyContains(t, store, cleanup.ID)
 	if !cleanupReady {
 		t.Fatalf("cleanup %s should be ready after body fails closed", cleanup.ID)
+	}
+}
+
+// TestProcessScopeCheckAbortRefusesMemberBlockedOnInFlightControl pins the shape
+// that TestProcessScopeCheckAbortsScopeOnFailure deliberately omits: a scope
+// member whose only blocker is the scope-check currently aborting the scope.
+// skipScopeMembers judges such a member skippable — runtime.go excludes the
+// in-flight control from the pending set, and canSkipScopeMemberWithDeps only
+// consults that set — then closes it with an unforced update, which bd refuses.
+//
+// The compiler mints this shape directly. formula/graph.go mints one scope-check
+// per scoped step, carrying that step's gc.scope_ref, and rewriteGraphRefs then
+// repoints every reference at a scoped step onto that step's scope-check —
+// leaving the raw name only for the body the control closes. So a scoped step B
+// that needs same-scope sibling A compiles to "B needs A-scope-check", with B
+// and the control sharing a scope_ref. When A fails, B is an open member of the
+// very scope its own blocker is aborting.
+//
+// The assertion below is the current, wrong behavior, pinned so the eventual fix
+// is visible as a diff rather than a silent flip. When ga-4ote2 lands this test
+// should assert a clean abort — and must also assert the member's edge onto the
+// control survives, or a fix that simply deletes the dep would pass it.
+func TestProcessScopeCheckAbortRefusesMemberBlockedOnInFlightControl(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "preflight",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for preflight",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	control = mustGetBead(t, store, control.ID)
+	futureMember := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+
+	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
+	mustDepAdd(t, store, futureMember.ID, control.ID, "blocks")
+
+	_, err := ProcessControl(store, control, ProcessOptions{})
+	if err == nil {
+		t.Fatalf("ProcessControl(scope-check fail) succeeded; expected the blocked-close refusal from ga-4ote2")
+	}
+	if !strings.Contains(err.Error(), "cannot close blocked issue") {
+		t.Fatalf("ProcessControl error = %v, want a blocked-close refusal naming %s", err, futureMember.ID)
+	}
+	if bodyAfter := mustGetBead(t, store, body.ID); bodyAfter.Status != "open" {
+		t.Fatalf("body status = %q, want open — the abort failed before reaching the body close", bodyAfter.Status)
+	}
+}
+
+// TestProcessScopeCheckAbortRefusesLegacyBodyBlockedOnControl pins the original
+// ga-a6zy9 deadlock: the pre-Slice-4 topology where the scope body carries a
+// blocks edge to the very scope-check that closes it. Slice 4 stopped minting
+// this shape, so no live store should contain it, but nothing prevents a formula
+// or a hand-built fixture from reintroducing it — and under real bd it is
+// unrecoverable, because the control can never close the body it is blocked by.
+func TestProcessScopeCheckAbortRefusesLegacyBodyBlockedOnControl(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "preflight",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for preflight",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	control = mustGetBead(t, store, control.ID)
+
+	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
+	mustDepAdd(t, store, body.ID, control.ID, "blocks")
+
+	_, err := ProcessControl(store, control, ProcessOptions{})
+	if err == nil {
+		t.Fatalf("ProcessControl(legacy body self-edge) succeeded; expected the ga-a6zy9 deadlock refusal")
+	}
+	if !strings.Contains(err.Error(), "cannot close blocked issue") {
+		t.Fatalf("ProcessControl error = %v, want a blocked-close refusal naming body %s", err, body.ID)
+	}
+	if bodyAfter := mustGetBead(t, store, body.ID); bodyAfter.Status != "open" {
+		t.Fatalf("body status = %q, want open — bd refuses to close a bead blocked by the closing control", bodyAfter.Status)
 	}
 }
 
@@ -2282,28 +2418,315 @@ func newStrictCloseStore() *strictCloseStore {
 	return &strictCloseStore{MemStore: beads.NewMemStore()}
 }
 
-func (s *strictCloseStore) Close(id string) error {
+// The rules below mirror bd's close policy as measured against the installed
+// binaries, not as read off a source tree: the version banners on these dev
+// builds are unreliable (one reports its build ref as whatever branch it was
+// compiled on), so behavior is the only trustworthy evidence. Each rule cites
+// the observation that pins it; the probe transcripts are recorded on ga-a6zy9.
+//
+// The guard on the update path is beads #5206, which refuses a status update
+// that crosses a bead into done. It is not #4893 — that one guards "bd close",
+// a path BdStore always bypasses with --force (bdCloseArgs, bdstore.go).
+
+// blockingDepTypes are the dep types that stop a close. The empty string is in
+// the set because MemStore.DepAdd stores the caller's type verbatim, while bd
+// normalizes an unset type to "blocks" when the dep is added — "bd dep add"
+// with no --type reports "(blocks)" and stores dependency_type "blocks", so bd
+// never holds a ""-typed dep to evaluate in the first place. Mirroring bd's
+// behavior from a MemStore-backed double therefore means treating "" as
+// blocking; MemStore's own ready filter (memstore.go) omits it and would
+// under-report.
+var blockingDepTypes = map[string]bool{
+	"":                   true,
+	"blocks":             true,
+	"waits-for":          true,
+	"conditional-blocks": true,
+}
+
+// blockerStopsClose reports whether a blocker in the given status stops a close.
+// Pinned blockers are exempt in bd — pinning a blocker lets the blocked bead
+// close — and closed ones obviously are. Everything else stops it, in_progress
+// included, which is why this is not a status == "open" test.
+func blockerStopsClose(status string) bool {
+	return status != "closed" && status != "pinned"
+}
+
+// openBlockersOf returns the beads whose status stops a close of id.
+func (s *strictCloseStore) openBlockersOf(id string) ([]string, error) {
 	deps, err := s.DepList(id, "down")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var openBlockers []string
 	for _, dep := range deps {
-		if dep.Type != "blocks" {
+		if !blockingDepTypes[dep.Type] {
 			continue
 		}
 		blocker, err := s.Get(dep.DependsOnID)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if blocker.Status == "open" {
+		if blockerStopsClose(blocker.Status) {
 			openBlockers = append(openBlockers, blocker.ID)
 		}
 	}
+	return openBlockers, nil
+}
+
+// errCloseBlocked mirrors bd's blocked-close refusal. The wording matters:
+// "cannot close blocked issue" is the needle the dispatcher's tier table
+// matches on to classify the refusal as semantic rather than availability
+// (control.go), so a double that phrased it differently would exercise neither
+// the refusal nor its classification.
+func (s *strictCloseStore) errCloseBlocked(id string, openBlockers []string) error {
+	return fmt.Errorf("cannot close blocked issue: %s is blocked by [%s]", id, strings.Join(openBlockers, " "))
+}
+
+// errCloseOpenChildren mirrors bd's open-children refusal, which is a separate
+// rule from the blocked-dep one and carries its own wording.
+func (s *strictCloseStore) errCloseOpenChildren(id string, open int) error {
+	return fmt.Errorf("cannot close %s: %d open child issue(s); close children first or use --force to override", id, open)
+}
+
+// refuseClose returns the refusal bd would raise for closing id, or nil if bd
+// would allow it.
+func (s *strictCloseStore) refuseClose(id string) error {
+	current, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	// bd gates the policy on crossing INTO done, so restating closed as closed
+	// is allowed even with an open child or an open blocker. Idempotent
+	// re-processing is this codebase's stated convergence mechanism, so a double
+	// that refused a re-close would be stricter than production in exactly the
+	// direction that produces false failures.
+	if current.Status == "closed" {
+		return nil
+	}
+	// Children first: a bead with both an open child and an open blocker is
+	// refused for the child, so evaluating blockers first would report the wrong
+	// rule.
+	children, err := s.Children(current.ID)
+	if err != nil {
+		return err
+	}
+	if len(children) > 0 {
+		return s.errCloseOpenChildren(id, len(children))
+	}
+	openBlockers, err := s.openBlockersOf(id)
+	if err != nil {
+		return err
+	}
 	if len(openBlockers) > 0 {
-		return fmt.Errorf("cannot close %s: blocked by open issues %v", id, openBlockers)
+		return s.errCloseBlocked(id, openBlockers)
+	}
+	return nil
+}
+
+// Close is stricter than production. BdStore.close and CloseAll both emit
+// "bd close --force" (bdstore.go bdCloseArgs), and --force bypasses bd's
+// blocked-close guard, so real bd never refuses on this path. The override is
+// kept anyway as a belt-and-braces guard for the fallback in
+// updateMetadataAndClose: a test that trips it has built a shape whose safety
+// depends on --force, which is worth knowing even though production survives it.
+// The load-bearing override is Update, below.
+func (s *strictCloseStore) Close(id string) error {
+	if err := s.refuseClose(id); err != nil {
+		return err
 	}
 	return s.MemStore.Close(id)
+}
+
+// Update enforces the same refusal as Close. The dispatcher does not close beads
+// through Close: updateMetadataAndClose sets Status="closed" via Update and only
+// falls back to Close when that did not take (control.go). A double that guarded
+// Close alone therefore never fired on the path production actually uses, which
+// let a swap of any control's close ordering — closing the bead a control closes
+// before the control itself — pass the whole suite while deadlocking the fleet.
+// That is the ga-a6zy9 failure mode.
+func (s *strictCloseStore) Update(id string, opts beads.UpdateOpts) error {
+	if opts.Status != nil && *opts.Status == "closed" {
+		if err := s.refuseClose(id); err != nil {
+			return err
+		}
+	}
+	return s.MemStore.Update(id, opts)
+}
+
+// UpdateAll enforces the same refusal as Update, and is the batch path that
+// matters: skipScopeMembers (runtime.go) prefers UpdateAll via the
+// scopeSkipBatchUpdater interface and only falls back to per-id Update when the
+// store lacks it. BdStore.UpdateAll emits a plain "bd update --status closed"
+// with no --force (bdstore.go), unlike CloseAll, so bd refuses it — measured
+// against both bd binaries installed on this host, which reject an unforced
+// "update --status closed" on a blocked bead and accept it on an unblocked one.
+// MemStore has no UpdateAll of its own; declaring it here is what makes the
+// double take the same branch production takes. See ga-4ote2.
+func (s *strictCloseStore) UpdateAll(ids []string, opts beads.UpdateOpts) (int, error) {
+	updated := 0
+	for _, id := range ids {
+		if err := s.Update(id, opts); err != nil {
+			return updated, err
+		}
+		updated++
+	}
+	return updated, nil
+}
+
+// TestStrictCloseStoreMirrorsBdClosePolicy covers the double itself. It exists
+// because an unexercised rule in this store is indistinguishable from a missing
+// one — the Close-only guard this file used to carry looked correct for as long
+// as it went unexercised, and the whole point of the store is to be a rule the
+// dispatcher cannot route around. Every case below mirrors a behavior measured
+// against a real bd binary; if bd's policy changes, these are the assertions
+// that should fail first.
+func TestStrictCloseStoreMirrorsBdClosePolicy(t *testing.T) {
+	t.Parallel()
+
+	closed := "closed"
+	newBead := func(t *testing.T, store *strictCloseStore, title string) beads.Bead {
+		t.Helper()
+		return mustCreateWorkflowBead(t, store, beads.Bead{Title: title, Type: "task"})
+	}
+	newChild := func(t *testing.T, store *strictCloseStore, title, parentID string) beads.Bead {
+		t.Helper()
+		return mustCreateWorkflowBead(t, store, beads.Bead{Title: title, Type: "task", ParentID: parentID})
+	}
+	setStatus := func(t *testing.T, store *strictCloseStore, id, status string) {
+		t.Helper()
+		// Go through MemStore so setting up a fixture never trips the policy
+		// under test.
+		if err := store.MemStore.Update(id, beads.UpdateOpts{Status: &status}); err != nil {
+			t.Fatalf("seed status %s=%s: %v", id, status, err)
+		}
+	}
+
+	tests := []struct {
+		name    string
+		build   func(t *testing.T, store *strictCloseStore) string
+		wantErr string
+	}{
+		{
+			name: "open blocker refuses",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				mustDepAdd(t, store, subject.ID, blocker.ID, "blocks")
+				return subject.ID
+			},
+			wantErr: "cannot close blocked issue",
+		},
+		{
+			name: "in_progress blocker refuses",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				mustDepAdd(t, store, subject.ID, blocker.ID, "blocks")
+				setStatus(t, store, blocker.ID, "in_progress")
+				return subject.ID
+			},
+			wantErr: "cannot close blocked issue",
+		},
+		{
+			name: "closed blocker allows",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				mustDepAdd(t, store, subject.ID, blocker.ID, "blocks")
+				setStatus(t, store, blocker.ID, "closed")
+				return subject.ID
+			},
+		},
+		{
+			name: "pinned blocker allows",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				mustDepAdd(t, store, subject.ID, blocker.ID, "blocks")
+				setStatus(t, store, blocker.ID, "pinned")
+				return subject.ID
+			},
+		},
+		{
+			name: "untyped dep refuses because MemStore stores it verbatim",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				mustDepAdd(t, store, subject.ID, blocker.ID, "")
+				return subject.ID
+			},
+			wantErr: "cannot close blocked issue",
+		},
+		{
+			name: "non-blocking dep type allows",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, related := newBead(t, store, "subject"), newBead(t, store, "related")
+				mustDepAdd(t, store, subject.ID, related.ID, "related")
+				return subject.ID
+			},
+		},
+		{
+			name: "open child refuses with its own rule",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				parent := newBead(t, store, "parent")
+				newChild(t, store, "child", parent.ID)
+				return parent.ID
+			},
+			wantErr: "open child issue(s)",
+		},
+		{
+			name: "closed child allows",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				parent := newBead(t, store, "parent")
+				child := newChild(t, store, "child", parent.ID)
+				setStatus(t, store, child.ID, "closed")
+				return parent.ID
+			},
+		},
+		{
+			name: "open child outranks open blocker",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				parent, blocker := newBead(t, store, "parent"), newBead(t, store, "blocker")
+				newChild(t, store, "child", parent.ID)
+				mustDepAdd(t, store, parent.ID, blocker.ID, "blocks")
+				return parent.ID
+			},
+			wantErr: "open child issue(s)",
+		},
+		{
+			name: "re-closing an already-closed bead is exempt from both rules",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				newChild(t, store, "child", subject.ID)
+				mustDepAdd(t, store, subject.ID, blocker.ID, "blocks")
+				setStatus(t, store, subject.ID, "closed")
+				return subject.ID
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := newStrictCloseStore()
+			subjectID := tc.build(t, store)
+
+			err := store.Update(subjectID, beads.UpdateOpts{Status: &closed})
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("Update(%s, closed) = %v, want success", subjectID, err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("Update(%s, closed) succeeded, want refusal containing %q", subjectID, tc.wantErr)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("Update(%s, closed) = %v, want refusal containing %q", subjectID, err, tc.wantErr)
+			}
+
+			// UpdateAll is the batch path skipScopeMembers prefers; it must
+			// agree with Update or the guard is only half-armed.
+			store2 := newStrictCloseStore()
+			subjectID2 := tc.build(t, store2)
+			_, batchErr := store2.UpdateAll([]string{subjectID2}, beads.UpdateOpts{Status: &closed})
+			if (batchErr != nil) != (err != nil) {
+				t.Fatalf("UpdateAll disagrees with Update: UpdateAll=%v, Update=%v", batchErr, err)
+			}
+		})
+	}
 }
 
 func TestProcessWorkflowFinalizeClosesWorkflow(t *testing.T) {
