@@ -228,7 +228,8 @@ func newImportCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func newImportInstallCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var rebindCacheRoot bool
+	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install imports from pack.toml and packs.lock",
 		Args:  cobra.NoArgs,
@@ -238,12 +239,21 @@ func newImportInstallCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
 				return errExit
 			}
+			if rebindCacheRoot {
+				if err := packman.RebindCacheRoot(cityPath); err != nil {
+					fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
+					return errExit
+				}
+			}
 			if doImportInstall(cityPath, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&rebindCacheRoot, "rebind-cache-root", false,
+		"move this city onto the repo cache root this process resolves (use after deliberately changing GC_HOME)")
+	return cmd
 }
 
 func newImportUpgradeCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -724,7 +734,6 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 		printCredentialHint(stderr, err)
 		return 1
 	}
-
 	// Installing the locked imports can still leave the city with a composed
 	// config the loader will refuse: install resolves and fetches packs, but
 	// never runs the same expansion/validation `gc doctor`'s
@@ -744,6 +753,14 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Name the cache root the clones landed in. The success line is the only
+	// place the writer's view of the cache is ever printed, and it is what
+	// makes a GC_HOME split visible next to the reader-side "locked but not
+	// cached at <root>" message instead of a mystery.
+	if root, rootErr := packman.RepoCacheRoot(); rootErr == nil {
+		fmt.Fprintf(stdout, "Installed %d remote import(s) into %s\n", len(lock.Packs), root) //nolint:errcheck
+		return 0
+	}
 	fmt.Fprintf(stdout, "Installed %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
 	return 0
 }

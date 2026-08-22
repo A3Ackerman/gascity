@@ -314,6 +314,37 @@ $ gc config show --validate
 $ gc config show | rg 'planner'
 ```
 
+#### The Cache Root A City Is Bound To
+
+`packs.lock` is a committed artifact and is shared by everything that touches
+the city; the clones it pins live in a **machine-global** cache under
+`$GC_HOME/cache/repos` (`$HOME/.gc/cache/repos` when `GC_HOME` is unset). Those
+are two different scopes, so install records which cache root it materialized
+into — in machine-local city state, never in the lockfile:
+
+```text
+<city>/.gc/repo-cache-root
+```
+
+Install refuses to advance a city whose recorded root is not the one the running
+process resolves. Without that refusal the split is silent and permanent:
+install reports success and advances the pins, while the clones land in a cache
+the city is never served from, so every later `gc reload` fails with `locked but
+not cached ... run "gc import install"` — naming the command that just
+succeeded. The usual cause is an environment that exports `GC_HOME` from a
+**login** profile (`/etc/profile.d/*.sh`, `~/.bash_profile`): a supervisor or
+login shell sees it, while a non-login shell — `ssh host '<cmd>'`, a cron entry,
+an agent's shell — does not, and silently falls back to `$HOME/.gc`. Export
+`GC_HOME` where every process sees it, or set it explicitly before installing.
+
+If you moved `GC_HOME` deliberately, move the city with it:
+
+```text
+$ gc import install --rebind-cache-root
+```
+
+That clears the recorded root and refetches whatever the new one is missing.
+
 ### Private Packs And Credentials
 
 A pack whose source (or a transitive import) is a **private** repository needs a
