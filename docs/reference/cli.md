@@ -2139,8 +2139,12 @@ gc import credential remove <match> [flags]
 Install imports from pack.toml and packs.lock
 
 ```
-gc import install
+gc import install [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--rebind-cache-root` | bool |  | move this city onto the repo cache root this process resolves (use after deliberately changing GC_HOME) |
 
 ## gc import list
 

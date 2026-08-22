@@ -91,6 +91,9 @@ func InstallLocked(cityRoot string) (*Lockfile, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := CheckCacheRootBinding(cityRoot); err != nil {
+		return nil, err
+	}
 
 	sources := make([]string, 0, len(lock.Packs))
 	for source := range lock.Packs {
@@ -103,6 +106,11 @@ func InstallLocked(cityRoot string) (*Lockfile, error) {
 			return nil, fmt.Errorf("lock entry %q is missing commit", source)
 		}
 		if _, err := EnsureRepoInCache(cityRoot, source, pack.Commit); err != nil {
+			return nil, err
+		}
+	}
+	if len(lock.Packs) > 0 {
+		if err := stampCacheRootBinding(cityRoot); err != nil {
 			return nil, err
 		}
 	}
@@ -179,6 +187,13 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 	if err != nil {
 		return nil, err
 	}
+	// Check the binding before anything resolves or fetches. syncLock is the
+	// single choke point every packs.lock writer passes through, so refusing
+	// here keeps the advanced pins off disk when this process would materialize
+	// them into a cache the city is not served from.
+	if err := CheckCacheRootBinding(cityRoot); err != nil {
+		return nil, err
+	}
 
 	state := syncState{
 		cityRoot:       cityRoot,
@@ -213,6 +228,14 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 			return nil, err
 		}
 		if !dirty && !chosenChanged && sameStringMap(constraints, nextConstraints) && sameSet(reachable, nextReachable) {
+			// The closure is materialized in the active cache root at this
+			// point (discoverReachableClosure ensures every reachable source),
+			// so record which root that was.
+			if len(nextReachable) > 0 {
+				if err := stampCacheRootBinding(cityRoot); err != nil {
+					return nil, err
+				}
+			}
 			return state.buildLock(nextReachable), nil
 		}
 		constraints = nextConstraints
