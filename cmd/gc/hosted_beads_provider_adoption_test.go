@@ -145,6 +145,8 @@ func TestHostedBeadsCredentialSelectorIsExact(t *testing.T) {
 	for _, key := range []string{"GC_DOLT_CRED_CMD", "BEADS_DOLT_CREDENTIAL_COMMAND"} {
 		t.Setenv(key, "")
 	}
+	providerArgv := `["/opt/gasworks","credential-provider"]`
+	t.Setenv(registryCredentialProviderEnv, providerArgv)
 	tests := []struct {
 		name    string
 		city    func(*testing.T) string
@@ -191,6 +193,9 @@ func TestHostedBeadsCredentialSelectorIsExact(t *testing.T) {
 			}
 			if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; (got == hostedBeadsCredentialBridgeCommand) != test.want {
 				t.Fatalf("credential command = %q, selected=%v, want selected=%v", got, got == hostedBeadsCredentialBridgeCommand, test.want)
+			}
+			if got, present := env[registryCredentialProviderEnv]; present != test.want || (present && got != providerArgv) {
+				t.Fatalf("provider argv = %q, present=%v; want exact projection=%v", got, present, test.want)
 			}
 		})
 	}
@@ -284,7 +289,8 @@ func TestHostedBeadsProviderArgvProjection(t *testing.T) {
 		t.Run(raw, func(t *testing.T) {
 			t.Setenv(registryCredentialProviderEnv, raw)
 			env := map[string]string{}
-			if err := applyHostedBeadsCredentialEnv(env, t.TempDir()); err != nil {
+			cityPath := writeHostedBeadsCity(t, "https://beads.example", "gasworks", false)
+			if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
 				t.Fatal(err)
 			}
 			got, present := env[registryCredentialProviderEnv]

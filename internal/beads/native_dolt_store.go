@@ -111,9 +111,17 @@ func processEnvSnapshotExcludingNativeDoltOpen() []string {
 }
 
 func withNativeDoltOpenEnv(env map[string]string) (func(), error) {
+	return withNativeDoltOpenEnvAndCredentialCommand(env, "")
+}
+
+func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credentialCommand string) (func(), error) {
 	nativeDoltOpenEnvMu.Lock()
-	previous := make(map[string]*string, len(nativeDoltOpenEnvKeys))
-	for _, key := range nativeDoltOpenEnvKeys {
+	keys := nativeDoltOpenEnvKeys
+	if credentialCommand != "" {
+		keys = append(append([]string(nil), nativeDoltOpenEnvKeys...), "BEADS_DOLT_CREDENTIAL_COMMAND")
+	}
+	previous := make(map[string]*string, len(keys))
+	for _, key := range keys {
 		if value, ok := os.LookupEnv(key); ok {
 			copied := value
 			previous[key] = &copied
@@ -121,6 +129,9 @@ func withNativeDoltOpenEnv(env map[string]string) (func(), error) {
 			previous[key] = nil
 		}
 		value, ok := env[key]
+		if key == "BEADS_DOLT_CREDENTIAL_COMMAND" {
+			value, ok = credentialCommand, true
+		}
 		var err error
 		if ok && strings.TrimSpace(value) != "" {
 			err = os.Setenv(key, value)
@@ -128,19 +139,19 @@ func withNativeDoltOpenEnv(env map[string]string) (func(), error) {
 			err = os.Unsetenv(key)
 		}
 		if err != nil {
-			restoreNativeDoltOpenEnv(previous)
+			restoreNativeDoltOpenEnv(previous, keys)
 			nativeDoltOpenEnvMu.Unlock()
 			return nil, fmt.Errorf("projecting native Dolt open env %s: %w", key, err)
 		}
 	}
 	return func() {
-		restoreNativeDoltOpenEnv(previous)
+		restoreNativeDoltOpenEnv(previous, keys)
 		nativeDoltOpenEnvMu.Unlock()
 	}, nil
 }
 
-func restoreNativeDoltOpenEnv(previous map[string]*string) {
-	for _, key := range nativeDoltOpenEnvKeys {
+func restoreNativeDoltOpenEnv(previous map[string]*string, keys []string) {
+	for _, key := range keys {
 		if value := previous[key]; value != nil {
 			_ = os.Setenv(key, *value)
 			continue
@@ -212,6 +223,28 @@ func OpenNativeDoltStoreAtWithoutAmbientEnv(ctx context.Context, scopeRoot strin
 	}
 	defer restore()
 	return newNativeDoltStoreAt(ctx, scopeRoot, nil, opts...)
+}
+
+// OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand opens a native
+// Dolt-backed store with the ambient BEADS_ namespace withheld and one
+// explicitly selected credential command projected for the duration of the
+// open.
+//
+// The command is deliberately supplied by the caller rather than read from
+// the process environment. This keeps a workspace open hermetic while still
+// allowing a binding that explicitly selected a remote credential provider to
+// authenticate its server connection. The command is restored with the rest
+// of the withheld namespace before this function returns.
+func OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(ctx context.Context, scopeRoot, credentialCommand string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
+	if strings.TrimSpace(credentialCommand) == "" {
+		return nil, errors.New("native Dolt open credential command is empty")
+	}
+	restore, err := withWithheldBeadsEnv()
+	if err != nil {
+		return nil, err
+	}
+	defer restore()
+	return newNativeDoltStoreAtWithCredentialCommand(ctx, scopeRoot, nil, credentialCommand, opts...)
 }
 
 // NativeDoltStore is a Store implementation backed by the upstream beads
@@ -310,9 +343,13 @@ func OpenNativeDoltStoreAt(ctx context.Context, scopeRoot string, env map[string
 }
 
 func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[string]string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
+	return newNativeDoltStoreAtWithCredentialCommand(parent, scopeRoot, env, "", opts...)
+}
+
+func newNativeDoltStoreAtWithCredentialCommand(parent context.Context, scopeRoot string, env map[string]string, credentialCommand string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
 	ctx, cancel := nativeDoltOperationContext(parent)
 	defer cancel()
-	storage, prefix, err := openNativeStorage(ctx, scopeRoot, env, true)
+	storage, prefix, err := openNativeStorageWithCredentialCommand(ctx, scopeRoot, env, credentialCommand, true)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +375,11 @@ func OpenNativeStorage(ctx context.Context, scopeRoot string, env map[string]str
 // the env is still projected. It is shared by the initial open and the
 // read-path reconnect that recovers from a managed-Dolt hard-kill/rebind.
 func openNativeStorage(ctx context.Context, scopeRoot string, env map[string]string, readPrefix bool) (beadslib.Storage, string, error) {
-	restoreEnv, err := withNativeDoltOpenEnv(env)
+	return openNativeStorageWithCredentialCommand(ctx, scopeRoot, env, "", readPrefix)
+}
+
+func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot string, env map[string]string, credentialCommand string, readPrefix bool) (beadslib.Storage, string, error) {
+	restoreEnv, err := withNativeDoltOpenEnvAndCredentialCommand(env, credentialCommand)
 	if err != nil {
 		return nil, "", err
 	}

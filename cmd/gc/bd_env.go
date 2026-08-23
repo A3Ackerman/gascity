@@ -511,7 +511,6 @@ func applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error
 	if env == nil {
 		return nil
 	}
-	projectCredentialProviderEnv(env)
 	if command := strings.TrimSpace(env["GC_DOLT_CRED_CMD"]); command != "" {
 		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
 		return nil
@@ -532,6 +531,7 @@ func applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error
 		return err
 	}
 	if selected {
+		projectCredentialProviderEnv(env)
 		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = hostedBeadsCredentialBridgeCommand
 	}
 	return nil
