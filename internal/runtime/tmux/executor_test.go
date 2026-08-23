@@ -495,6 +495,35 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	if strings.Contains(setEnv, "GC_CITY") {
 		t.Errorf("first call = %q marked GC_CITY removed; only empty-valued keys are withheld", setEnv)
 	}
+
+	t.Run("hosted beads namespace", func(t *testing.T) {
+		exec := &fakeExecutor{}
+		tm := NewTmux()
+		tm.exec = exec
+		ops := &tmuxStartOps{tm: tm}
+
+		env := map[string]string{
+			"BEADS_DB":               "",
+			"BEADS_DIR":              "/selected/.beads",
+			"BEADS_FUTURE_AUTHORITY": "",
+			"GC_CITY":                "/tmp/city",
+		}
+		if err := ops.respawnAgent("gc-test-beads-pin", "/proj", "claude", env); err != nil {
+			t.Fatalf("respawnAgent: %v", err)
+		}
+		if len(exec.calls) != 3 {
+			t.Fatalf("tmux calls = %d (%v), want two set-environment calls then respawn-pane", len(exec.calls), exec.calls)
+		}
+		for i, key := range []string{"BEADS_DB", "BEADS_FUTURE_AUTHORITY"} {
+			setEnv := strings.Join(exec.calls[i], " ")
+			if !strings.Contains(setEnv, "set-environment -t gc-test-beads-pin -r "+key) {
+				t.Errorf("call %d = %q, want %s marked removed from the session env", i, setEnv, key)
+			}
+		}
+		if respawn := strings.Join(exec.calls[2], " "); !strings.Contains(respawn, "respawn-pane") {
+			t.Errorf("third call = %q, want respawn-pane", respawn)
+		}
+	})
 }
 
 // No withheld CREDENTIAL means no extra tmux round-trip. The nesting-detection

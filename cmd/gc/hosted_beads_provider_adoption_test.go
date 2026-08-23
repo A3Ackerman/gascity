@@ -15,9 +15,22 @@ import (
 	"github.com/gastownhall/gascity/internal/clientcontext"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/credentialprovider"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 const hostedBeadsProviderTestMarker = "hosted-beads-credential-provider-helper"
+
+func stubHostedBeadsCredentialExecutable(t *testing.T, executable string) string {
+	t.Helper()
+	original := hostedBeadsCredentialExecutable
+	hostedBeadsCredentialExecutable = func() (string, error) { return executable, nil }
+	t.Cleanup(func() { hostedBeadsCredentialExecutable = original })
+	absolute, err := filepath.Abs(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return shellquote.Quote(absolute) + " internal beads-credential"
+}
 
 // TestHostedBeadsCredentialProviderProcess is re-executed by the credential
 // provider tests below. The subprocess records the exact request and returns a
@@ -145,6 +158,7 @@ func TestHostedBeadsCredentialSelectorIsExact(t *testing.T) {
 	for _, key := range []string{"GC_DOLT_CRED_CMD", "BEADS_DOLT_CREDENTIAL_COMMAND"} {
 		t.Setenv(key, "")
 	}
+	wantBridge := stubHostedBeadsCredentialExecutable(t, "/opt/current gc/bin/gc")
 	providerArgv := `["/opt/gasworks","credential-provider"]`
 	t.Setenv(registryCredentialProviderEnv, providerArgv)
 	tests := []struct {
@@ -191,8 +205,8 @@ func TestHostedBeadsCredentialSelectorIsExact(t *testing.T) {
 			if (err != nil) != test.wantErr {
 				t.Fatalf("applyHostedBeadsCredentialEnv() error = %v, wantErr %v", err, test.wantErr)
 			}
-			if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; (got == hostedBeadsCredentialBridgeCommand) != test.want {
-				t.Fatalf("credential command = %q, selected=%v, want selected=%v", got, got == hostedBeadsCredentialBridgeCommand, test.want)
+			if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; (got == wantBridge) != test.want {
+				t.Fatalf("credential command = %q, selected=%v, want selected=%v", got, got == wantBridge, test.want)
 			}
 			if got, present := env[registryCredentialProviderEnv]; present != test.want || (present && got != providerArgv) {
 				t.Fatalf("provider argv = %q, present=%v; want exact projection=%v", got, present, test.want)
@@ -204,6 +218,7 @@ func TestHostedBeadsCredentialSelectorIsExact(t *testing.T) {
 func TestHostedBeadsCredentialSelectorUsesComposedConfig(t *testing.T) {
 	t.Setenv("GC_DOLT_CRED_CMD", "")
 	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+	wantBridge := stubHostedBeadsCredentialExecutable(t, "/opt/current gc/bin/gc")
 	cityPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("include = [\"storage.toml\"]\n[workspace]\nname = \"composed\"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -215,8 +230,8 @@ func TestHostedBeadsCredentialSelectorUsesComposedConfig(t *testing.T) {
 	if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
 		t.Fatal(err)
 	}
-	if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != hostedBeadsCredentialBridgeCommand {
-		t.Fatalf("credential command = %q, want %q", got, hostedBeadsCredentialBridgeCommand)
+	if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != wantBridge {
+		t.Fatalf("credential command = %q, want %q", got, wantBridge)
 	}
 }
 
@@ -258,6 +273,7 @@ func TestHostedBeadsCredentialSelectorRequiresProviderAndSharedBinding(t *testin
 
 func TestHostedBeadsCredentialLegacyHelperPrecedence(t *testing.T) {
 	cityPath := writeHostedBeadsCity(t, "https://beads.example", "gasworks", false)
+	wantBridge := stubHostedBeadsCredentialExecutable(t, "/opt/current gc/bin/gc")
 	tests := []struct {
 		name       string
 		env        map[string]string
@@ -268,7 +284,7 @@ func TestHostedBeadsCredentialLegacyHelperPrecedence(t *testing.T) {
 		{name: "map gc helper", env: map[string]string{"GC_DOLT_CRED_CMD": "/map/gc-helper"}, ambientBD: "/ambient/bd-helper", wantHelper: "/map/gc-helper"},
 		{name: "map bd helper", env: map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": "/map/bd-helper"}, ambientGC: "/ambient/gc-helper", wantHelper: "/map/bd-helper"},
 		{name: "ambient gc helper", env: map[string]string{}, ambientGC: "/ambient/gc-helper", ambientBD: "/ambient/bd-helper", wantHelper: "/ambient/gc-helper"},
-		{name: "ambient bd helper", env: map[string]string{}, ambientBD: "/ambient/bd-helper", wantHelper: "/ambient/bd-helper"},
+		{name: "ambient bd helper is withheld", env: map[string]string{}, ambientBD: "/ambient/bd-helper", wantHelper: wantBridge},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -278,13 +294,14 @@ func TestHostedBeadsCredentialLegacyHelperPrecedence(t *testing.T) {
 				t.Fatal(err)
 			}
 			if got := test.env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != test.wantHelper {
-				t.Fatalf("credential command = %q, want legacy helper %q", got, test.wantHelper)
+				t.Fatalf("credential command = %q, want %q", got, test.wantHelper)
 			}
 		})
 	}
 }
 
 func TestHostedBeadsProviderArgvProjection(t *testing.T) {
+	stubHostedBeadsCredentialExecutable(t, "/opt/current gc/bin/gc")
 	for _, raw := range []string{"", `{`, `["/opt/gasworks","credential-provider"]`} {
 		t.Run(raw, func(t *testing.T) {
 			t.Setenv(registryCredentialProviderEnv, raw)
@@ -309,6 +326,7 @@ func TestHostedBeadsProviderCityRigAndExecProjection(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT_CRED_CMD", "")
 	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+	wantBridge := stubHostedBeadsCredentialExecutable(t, filepath.Join("relative current gc dir with ' quote", "gc"))
 	providerArgv := `["/opt/gasworks","credential-provider","--profile","prod"]`
 	t.Setenv(registryCredentialProviderEnv, providerArgv)
 	cityPath := writeHostedBeadsCity(t, "https://beads.example", "gasworks", false)
@@ -328,8 +346,8 @@ func TestHostedBeadsProviderCityRigAndExecProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, env := range map[string]map[string]string{"city": cityEnv, "rig": rigEnv} {
-		if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != hostedBeadsCredentialBridgeCommand {
-			t.Errorf("%s credential command = %q", name, got)
+		if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != wantBridge {
+			t.Errorf("%s credential command = %q, want absolute quoted bridge %q", name, got, wantBridge)
 		}
 		if got := env[registryCredentialProviderEnv]; got != providerArgv {
 			t.Errorf("%s %s = %q, want %q", name, registryCredentialProviderEnv, got, providerArgv)
@@ -337,11 +355,76 @@ func TestHostedBeadsProviderCityRigAndExecProjection(t *testing.T) {
 	}
 	destination := map[string]string{}
 	copyExecProjectedBackendEnv(destination, rigEnv)
-	if got := destination["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != hostedBeadsCredentialBridgeCommand {
-		t.Errorf("exec credential command = %q", got)
+	if got := destination["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != wantBridge {
+		t.Errorf("exec credential command = %q, want absolute quoted bridge %q", got, wantBridge)
 	}
 	if got := destination[registryCredentialProviderEnv]; got != providerArgv {
 		t.Errorf("exec %s = %q, want %q", registryCredentialProviderEnv, got, providerArgv)
+	}
+}
+
+func TestHostedBeadsAmbientNamespaceIsWithheldFromSessionsAndCommands(t *testing.T) {
+	t.Setenv("GC_DOLT_CRED_CMD", "")
+	t.Setenv(registryCredentialProviderEnv, `["/opt/gasworks","credential-provider"]`)
+	ambient := map[string]string{
+		"BEADS_DB":                      "ambient-database",
+		"BEADS_DOLT_SERVER_HOST":        "ambient.example",
+		"BEADS_DOLT_CREDENTIAL_COMMAND": "/ambient/helper",
+		"BEADS_FUTURE_AUTHORITY":        "ambient-future-value",
+	}
+	for key, value := range ambient {
+		t.Setenv(key, value)
+	}
+	wantBridge := stubHostedBeadsCredentialExecutable(t, "/opt/current gc/bin/gc")
+	cityPath := writeHostedBeadsCity(t, "https://beads.example", "gasworks", false)
+	writeCompleteStorageBinding(t, cityPath)
+
+	sessionEnv, err := sessionBackendEnvWithError(cityPath, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionEnv["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != wantBridge {
+		t.Fatalf("session credential command = %q, want selected bridge %q", got, wantBridge)
+	}
+	for key := range ambient {
+		if key == "BEADS_DOLT_CREDENTIAL_COMMAND" {
+			continue
+		}
+		if got, present := sessionEnv[key]; !present || got != "" {
+			t.Errorf("session %s = %q, present=%v; want an explicit withholding", key, got, present)
+		}
+	}
+
+	runner, err := beadsCommandRunnerForHostedCity(cityPath, sessionEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := runner(t.TempDir(), "sh", "-c", "env | sort")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childEnv := string(out)
+	for key, value := range ambient {
+		if strings.Contains(childEnv, key+"="+value+"\n") {
+			t.Errorf("hosted command inherited %s", key)
+		}
+	}
+	if !strings.Contains(childEnv, "BEADS_DOLT_CREDENTIAL_COMMAND="+wantBridge+"\n") {
+		t.Errorf("hosted command env does not contain selected bridge: %q", childEnv)
+	}
+
+	processEnv, err := cityRuntimeProcessEnvWithError(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processValues := hostedEnvEntriesToMap(processEnv)
+	if got := processValues["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != wantBridge {
+		t.Fatalf("city process credential command = %q, want selected bridge %q", got, wantBridge)
+	}
+	for key, ambientValue := range ambient {
+		if got := processValues[key]; got == ambientValue {
+			t.Errorf("city process inherited ambient %s=%q", key, got)
+		}
 	}
 }
 

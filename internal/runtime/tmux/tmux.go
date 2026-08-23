@@ -572,16 +572,16 @@ func withEnvUnsetPrefix(command string, unsetKeys []string) string {
 // SURVIVE into later processes, rather than only applying to the command tmux
 // execs first.
 //
-// That is the controller-scope credentials and nothing else. The other keys a
-// session env pins empty — CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, the CODEX_ pair —
-// are nesting-detection flags, not secrets: the `env -u` prefix already gives
-// them the behavior they need on the launched command, and marking them in the
-// session environment would buy nothing while putting an extra tmux round-trip
-// on every session creation in the repo.
+// That is controller-scope credentials plus the BEADS_ namespace. A selected
+// workspace can pin any current or future BEADS_ key empty to prevent ambient
+// state from redirecting it, and a warm respawn must retain that choice. The
+// other keys a session env pins empty — CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, the
+// CODEX_ pair — are nesting-detection flags, not authority: the `env -u` prefix
+// already gives them the behavior they need on the launched command.
 func durableWithholdKeys(env map[string]string) []string {
 	var keys []string
 	for _, k := range sessionEnvUnsetKeys(env) {
-		if processenv.IsControllerOnlyEnv(k) {
+		if processenv.IsControllerOnlyEnv(k) || strings.HasPrefix(k, "BEADS_") {
 			keys = append(keys, k)
 		}
 	}

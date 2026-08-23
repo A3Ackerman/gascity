@@ -3,15 +3,46 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/credentialprovider"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/spf13/cobra"
 )
 
-const hostedBeadsCredentialBridgeCommand = "gc internal beads-credential"
+const hostedBeadsCredentialSubcommand = "internal beads-credential"
+
+// hostedBeadsCredentialExecutable is a seam for the command projection's
+// executable lookup. Production uses os.Executable, while tests can prove the
+// absolute-path and shell-quoting contract without invoking a real binary.
+var hostedBeadsCredentialExecutable = os.Executable
+
+// hostedBeadsCredentialCommand returns the command bd runs to mint a hosted
+// Beads credential. The executable is made absolute before shell quoting so a
+// child process cannot resolve a different gc through its inherited PATH, and
+// paths containing shell metacharacters remain one argv element.
+func hostedBeadsCredentialCommand() (string, error) {
+	executable, err := hostedBeadsCredentialExecutable()
+	if err != nil {
+		return "", fmt.Errorf("resolving the running gc executable for the credential provider: %w", err)
+	}
+	if strings.TrimSpace(executable) == "" {
+		return "", errors.New("resolving the running gc executable for the credential provider: empty path")
+	}
+	if !filepath.IsAbs(executable) {
+		executable, err = filepath.Abs(executable)
+		if err != nil {
+			return "", fmt.Errorf("resolving the running gc executable to an absolute path: %w", err)
+		}
+	}
+	return shellquote.Quote(executable) + " " + hostedBeadsCredentialSubcommand, nil
+}
 
 var hostedBeadsCredentialCache = credentialprovider.NewCache()
 

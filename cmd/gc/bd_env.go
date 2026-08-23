@@ -58,8 +58,12 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		env["GC_RIG_ROOT"] = ""
 		env["BEADS_DOLT_AUTO_START"] = "0"
 		env["BD_EXPORT_AUTO"] = "false"
+		hosted, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+		if err != nil {
+			return nil, err
+		}
 		credentialsFile := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
-		if credentialsFile == "" {
+		if credentialsFile == "" && !hosted {
 			credentialsFile = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"))
 		}
 		setExecProjectedBackendEnvEmpty(env)
@@ -69,7 +73,11 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
 			return nil, err
 		}
-		return beadsExecCommandRunnerWithEnv(env)(dir, name, args...)
+		runner, err := beadsCommandRunnerForHostedCity(cityPath, env)
+		if err != nil {
+			return nil, err
+		}
+		return runner(dir, name, args...)
 	}
 }
 
@@ -484,8 +492,12 @@ func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scop
 	if err != nil || !completeBinding {
 		return completeBinding, err
 	}
+	hosted, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		return true, err
+	}
 	credentialsFile := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
-	if credentialsFile == "" {
+	if credentialsFile == "" && !hosted {
 		credentialsFile = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"))
 	}
 	setExecProjectedBackendEnvEmpty(env)
@@ -511,6 +523,17 @@ func applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error
 	if env == nil {
 		return nil
 	}
+	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		return err
+	}
+	if selected {
+		// Exact hosted bindings must not inherit any part of the BEADS_*
+		// namespace. Explicit compatibility values below are projected into the
+		// map before the command runner applies it; ambient BEADS_* values are
+		// never treated as authorization for this binding.
+		withholdAmbientHostedBeadsEnv(env)
+	}
 	if command := strings.TrimSpace(env["GC_DOLT_CRED_CMD"]); command != "" {
 		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
 		return nil
@@ -522,19 +545,56 @@ func applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error
 		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
 		return nil
 	}
-	if command := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); command != "" {
-		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+	// The ambient BEADS_* namespace is untrusted for the exact hosted
+	// workspace selector. In particular, an inherited credential command must
+	// not replace the bridge selected below. Non-hosted/legacy paths retain the
+	// historical ambient fallback for compatibility.
+	if !selected {
+		if command := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); command != "" {
+			env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+			return nil
+		}
 		return nil
 	}
-	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	command, err := hostedBeadsCredentialCommand()
 	if err != nil {
 		return err
 	}
-	if selected {
-		projectCredentialProviderEnv(env)
-		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = hostedBeadsCredentialBridgeCommand
-	}
+	projectCredentialProviderEnv(env)
+	env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
 	return nil
+}
+
+// beadsCommandRunnerForHostedCity chooses the hermetic runner only for the
+// exact hosted Beads workspace binding. Explicit values in env remain valid
+// overrides; only the inherited BEADS_* namespace is withheld by the variant.
+func beadsCommandRunnerForHostedCity(cityPath string, env map[string]string) (beads.CommandRunner, error) {
+	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	if selected {
+		return beadsExecCommandRunnerWithEnvWithoutAmbientBeads(env), nil
+	}
+	return beadsExecCommandRunnerWithEnv(env), nil
+}
+
+// withholdAmbientHostedBeadsEnv pins every ambient BEADS_* key absent from an
+// explicit projection to an empty value. Runtime adapters interpret empty
+// values as removal, so unknown variables cannot flow into an agent session.
+func withholdAmbientHostedBeadsEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	for _, entry := range processEnvSnapshotExcludingNativeDoltOpen() {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || !strings.HasPrefix(key, "BEADS_") {
+			continue
+		}
+		if _, explicit := env[key]; !explicit {
+			env[key] = ""
+		}
+	}
 }
 
 // projectCredentialProviderEnv carries the provider argv configuration into
@@ -863,9 +923,10 @@ func appendBdContributorRoutingOptOutEnvKeys(keys []string) []string {
 }
 
 var (
-	beadsExecCommandRunnerWithEnv             = beads.ExecCommandRunnerWithEnv
-	processEnvSnapshotExcludingNativeDoltOpen = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
-	ambientNativeDoltOpenEnv                  = beads.AmbientNativeDoltOpenEnv
+	beadsExecCommandRunnerWithEnv                    = beads.ExecCommandRunnerWithEnv
+	beadsExecCommandRunnerWithEnvWithoutAmbientBeads = beads.ExecCommandRunnerWithEnvWithoutAmbientBeads
+	processEnvSnapshotExcludingNativeDoltOpen        = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
+	ambientNativeDoltOpenEnv                         = beads.AmbientNativeDoltOpenEnv
 )
 
 var recoverManagedBDCommand = func(cityPath string) error {
@@ -1251,7 +1312,10 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			env = map[string]string{}
 		}
 		ensureProjectedDoltEnvExplicit(env)
-		runner := beadsExecCommandRunnerWithEnv(env)
+		runner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, env)
+		if runnerErr != nil {
+			return nil, runnerErr
+		}
 		out, err := runner(dir, name, args...)
 		if name != "bd" {
 			return out, err
@@ -1270,7 +1334,10 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			return nil, retryEnvErr
 		}
 		ensureProjectedDoltEnvExplicit(retryEnv)
-		retryRunner := beadsExecCommandRunnerWithEnv(retryEnv)
+		retryRunner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, retryEnv)
+		if runnerErr != nil {
+			return nil, runnerErr
+		}
 		return retryRunner(dir, name, args...)
 	}
 }
@@ -1583,7 +1650,13 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 	cityPath = normalizePathForCompare(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
 	var projectionErr error
+	var hostedBeads bool
 	if cityUsesBdStoreContract(cityPath) {
+		var err error
+		hostedBeads, err = citySelectsHostedBeadsCredentialProvider(cityPath)
+		if err != nil {
+			projectionErr = err
+		}
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
 		applyBdContributorRoutingOptOut(source)
 		applyBdCLIRemoteSyncOptOut(source)
@@ -1625,7 +1698,11 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 			}
 		}
 	}
-	return mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides), projectionErr
+	environ := processEnvSnapshotExcludingNativeDoltOpen()
+	if hostedBeads {
+		environ = removeEnvKeyPrefix(environ, "BEADS_")
+	}
+	return mergeRuntimeEnv(environ, overrides), projectionErr
 }
 
 func applyBdCLIRemoteSyncOptOut(env map[string]string) {
