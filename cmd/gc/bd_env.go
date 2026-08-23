@@ -66,6 +66,9 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		if credentialsFile != "" {
 			env["BEADS_CREDENTIALS_FILE"] = credentialsFile
 		}
+		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+			return nil, err
+		}
 		return beadsExecCommandRunnerWithEnv(env)(dir, name, args...)
 	}
 }
@@ -489,12 +492,95 @@ func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scop
 	if credentialsFile != "" {
 		env["BEADS_CREDENTIALS_FILE"] = credentialsFile
 	}
+	if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+		return true, err
+	}
 	bdBin, err := workspacePinnedBdBinary(cityPath)
 	if err != nil {
 		return true, err
 	}
 	env["BD_BIN"] = bdBin
 	return true, nil
+}
+
+// applyHostedBeadsCredentialEnv selects the credential command for bd
+// subprocesses. Existing legacy helpers always win. Otherwise, and only for
+// the exact hosted beads-workspace storage selector, gc installs its fixed
+// bridge to the credential-provider protocol.
+func applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error {
+	if env == nil {
+		return nil
+	}
+	projectCredentialProviderEnv(env)
+	if command := strings.TrimSpace(env["GC_DOLT_CRED_CMD"]); command != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+		return nil
+	}
+	if strings.TrimSpace(env["BEADS_DOLT_CREDENTIAL_COMMAND"]) != "" {
+		return nil
+	}
+	if command := strings.TrimSpace(os.Getenv("GC_DOLT_CRED_CMD")); command != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+		return nil
+	}
+	if command := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); command != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
+		return nil
+	}
+	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		return err
+	}
+	if selected {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = hostedBeadsCredentialBridgeCommand
+	}
+	return nil
+}
+
+// projectCredentialProviderEnv carries the provider argv configuration into
+// subprocess and session maps. LookupEnv is intentional: an explicitly empty
+// override is invalid configuration and must reach the bridge so invocation
+// fails closed instead of silently using the default provider.
+func projectCredentialProviderEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	if _, exists := env[registryCredentialProviderEnv]; exists {
+		return
+	}
+	if raw, configured := os.LookupEnv(registryCredentialProviderEnv); configured {
+		env[registryCredentialProviderEnv] = raw
+	}
+}
+
+func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
+	cityConfigPath := filepath.Join(cityPath, "city.toml")
+	if _, err := os.Stat(cityConfigPath); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("read hosted Beads credential configuration: %w", err)
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, cityConfigPath)
+	if err != nil {
+		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
+	}
+	return configSelectsHostedBeadsCredentialProvider(cfg), nil
+}
+
+func configSelectsHostedBeadsCredentialProvider(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	storage := cfg.EffectiveStorage()
+	shape, bindingName := storageSplitShapeOf(storage)
+	if shape != storageSplitWhole {
+		return false
+	}
+	binding, ok := storage.Bindings[bindingName]
+	return ok &&
+		binding.Provider == config.StorageProviderBeadsWorkspace &&
+		strings.TrimSpace(binding.URL) != "" &&
+		binding.Auth == config.StorageAuthCredentialProvider
 }
 
 // applyCanonicalScopeBackendEnv dispatches to the appropriate backend
@@ -1446,6 +1532,9 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
 	}
+	if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+		return env, err
+	}
 	if scopeBackendIsDoltlite(cityPath, cityPath) {
 		clearProjectedDoltEnv(env)
 		env["GC_BEADS_BACKEND"] = "doltlite"
@@ -1499,6 +1588,9 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 		applyBdContributorRoutingOptOut(source)
 		applyBdCLIRemoteSyncOptOut(source)
 		applyBdAutoBackupOptOut(source)
+		if err := applyHostedBeadsCredentialEnv(source, cityPath); err != nil {
+			projectionErr = err
+		}
 		if bound, err := applyCityStorageBindingEnv(source, cityPath); err != nil {
 			clearProjectedDoltEnv(source)
 			mirrorBeadsDoltEnv(source)
@@ -1826,6 +1918,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 var hostedBeadsCredentialPassthroughKeys = []string{
 	"BEADS_DOLT_CREDENTIAL_COMMAND",
 	"BEADS_DOLT_SERVER_TLS",
+	registryCredentialProviderEnv,
 	"ORCHESTRATOR_KEY_FILE",
 	"EIA_AUDIENCE",
 	"EIA_SCOPES",
