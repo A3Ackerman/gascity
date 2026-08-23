@@ -194,6 +194,11 @@ var pasteBufferSeq uint64
 // validSessionNameRe validates session names to prevent shell injection
 var validSessionNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
+// validEnvNameRe is the identifier grammar accepted by the POSIX env utility.
+// Unset keys are embedded in the pane's shell command, so accepting anything
+// broader would let an inherited map key become shell syntax or an option.
+var validEnvNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // Common errors
 var (
 	ErrNoServer           = errors.New("no tmux server running")
@@ -557,15 +562,29 @@ func sessionEnvUnsetKeys(env map[string]string) []string {
 // execs starts without those vars. This covers the INITIAL exec only — it is a
 // property of one command string, not of the session — which is why
 // markSessionEnvRemoved has to carry the same withholding forward.
-func withEnvUnsetPrefix(command string, unsetKeys []string) string {
+func withEnvUnsetPrefix(command string, unsetKeys []string) (string, error) {
+	for _, key := range unsetKeys {
+		if !validEnvNameRe.MatchString(key) {
+			return "", fmt.Errorf("invalid environment variable name %q for tmux env -u", key)
+		}
+	}
 	if len(unsetKeys) == 0 || command == "" {
-		return command
+		return command, nil
 	}
 	var prefix string
 	for _, k := range unsetKeys {
 		prefix += " -u " + k
 	}
-	return "env" + prefix + " " + command
+	return "env" + prefix + " " + command, nil
+}
+
+func validateUnsetEnvKeys(env map[string]string) error {
+	for key, value := range env {
+		if value == "" && !validEnvNameRe.MatchString(key) {
+			return fmt.Errorf("invalid environment variable name %q for tmux env -u", key)
+		}
+	}
+	return nil
 }
 
 // durableWithholdKeys returns the empty-valued keys whose withholding must
@@ -609,6 +628,11 @@ func durableWithholdKeys(env map[string]string) []string {
 // contract. Every other failure is a real failure to apply a security control
 // and is returned.
 func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
+	for _, key := range keys {
+		if !validEnvNameRe.MatchString(key) {
+			return fmt.Errorf("invalid environment variable name %q for tmux session removal", key)
+		}
+	}
 	for _, k := range keys {
 		if _, err := t.run("set-environment", "-t", session, "-r", k); err != nil {
 			if alive, probeErr := t.HasSession(session); probeErr == nil && !alive {
@@ -647,6 +671,9 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
+	if err := validateUnsetEnvKeys(env); err != nil {
+		return err
+	}
 	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
@@ -671,7 +698,11 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	// pane's shell would otherwise inherit them from the tmux server's global
 	// environment, which holds whatever the controller exported when the server
 	// started. This prefix is a property of THIS command only.
-	command = withEnvUnsetPrefix(command, unsetKeys)
+	var err error
+	command, err = withEnvUnsetPrefix(command, unsetKeys)
+	if err != nil {
+		return err
+	}
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
 	if err := t.runNewSession(args, env); err != nil {

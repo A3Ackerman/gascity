@@ -2209,6 +2209,99 @@ func TestProcessEnvSnapshotWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
 	}
 }
 
+func TestProcessEnvSnapshotWaitsForWholeBeadsNamespaceRestore(t *testing.T) {
+	t.Setenv("BEADS_FUTURE_AUTHORITY", "ambient-authority")
+	restoreEnv, err := withWithheldBeadsEnv()
+	if err != nil {
+		t.Fatalf("withWithheldBeadsEnv: %v", err)
+	}
+	restored := false
+	t.Cleanup(func() {
+		if !restored {
+			restoreEnv()
+		}
+	})
+
+	envCh := make(chan []string, 1)
+	go func() {
+		envCh <- ProcessEnvSnapshotExcludingNativeDoltOpen()
+	}()
+	select {
+	case env := <-envCh:
+		t.Fatalf("process env snapshot completed while BEADS_ was withheld: %v", envValues(env, "BEADS_FUTURE_AUTHORITY"))
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	restoreEnv()
+	restored = true
+	select {
+	case env := <-envCh:
+		if got := envValues(env, "BEADS_FUTURE_AUTHORITY"); len(got) != 1 || got[0] != "ambient-authority" {
+			t.Fatalf("BEADS_FUTURE_AUTHORITY after restore = %v, want [ambient-authority]", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("process env snapshot did not complete after the BEADS_ namespace was restored")
+	}
+}
+
+func TestOrdinaryNativeOpenWaitsForWholeBeadsNamespaceRestore(t *testing.T) {
+	t.Setenv("BEADS_FUTURE_AUTHORITY", "ambient-authority")
+	restoreEnv, err := withWithheldBeadsEnv()
+	if err != nil {
+		t.Fatalf("withWithheldBeadsEnv: %v", err)
+	}
+	restored := false
+	t.Cleanup(func() {
+		if !restored {
+			restoreEnv()
+		}
+	})
+
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	seen := make(chan string, 1)
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		seen <- os.Getenv("BEADS_FUTURE_AUTHORITY")
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gc", nil },
+		}, nil
+	}
+
+	openDone := make(chan error, 1)
+	scopeRoot := t.TempDir()
+	go func() {
+		store, openErr := OpenNativeDoltStoreAt(context.Background(), scopeRoot, nil)
+		if store != nil {
+			_ = store.CloseStore()
+		}
+		openDone <- openErr
+	}()
+	select {
+	case got := <-seen:
+		t.Fatalf("ordinary native open ran while BEADS_ was withheld (saw %q)", got)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	restoreEnv()
+	restored = true
+	select {
+	case got := <-seen:
+		if got != "ambient-authority" {
+			t.Fatalf("ordinary native open saw BEADS_FUTURE_AUTHORITY=%q, want ambient-authority", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ordinary native open did not continue after the BEADS_ namespace was restored")
+	}
+	select {
+	case err := <-openDone:
+		if err != nil {
+			t.Fatalf("OpenNativeDoltStoreAt: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ordinary native open did not return")
+	}
+}
+
 // TestAmbientNativeDoltOpenEnvWaitsForNativeDoltOpenEnvRestore proves the guarded
 // single-key ambient read serializes with an in-flight native Dolt open. A native
 // open for a non-external scope unsets BEADS_DOLT_SERVER_TLS under nativeDoltOpenEnvMu

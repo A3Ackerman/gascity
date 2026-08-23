@@ -611,6 +611,22 @@ func TestOpenEngineHostedCredentialCommandIsInvokedAndAmbientEnvIsWithheld(t *te
 	}
 }
 
+func TestHostedWorkspaceOpenWiresCredentialRefreshingReopen(t *testing.T) {
+	data, err := os.ReadFile("engine.go")
+	if err != nil {
+		t.Fatalf("reading engine.go: %v", err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		"beads.WithNativeReopen(reopen)",
+		"beads.OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx, p.root, command)",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("hosted workspace open is missing bounded credential-refresh wiring %q", want)
+		}
+	}
+}
+
 // TestOpenEngineRefusesAHalfProvisionedWorkspaceWithoutBuildingOne is the
 // residue proof, and it is why the presence test is the configuration file
 // rather than the directory. The linked library treats a directory with no

@@ -99,7 +99,11 @@ func (p *workspaceProvider) openWorkspace(spec storebinding.BindingSpec) (worksp
 		}
 	}
 	command := shellquote.Quote(executable) + " internal beads-credential"
-	return beads.OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(context.Background(), p.root, command)
+	reopen := func(ctx context.Context) (beads.NativeStorage, error) {
+		return beads.OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx, p.root, command)
+	}
+	return beads.OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(
+		context.Background(), p.root, command, beads.WithNativeReopen(reopen))
 }
 
 // admit hands back an opened workspace this binding may serve from, and closes

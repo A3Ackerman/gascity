@@ -104,6 +104,52 @@ func TestNewSessionWithCommandAndEnvUnsetsControllerToken(t *testing.T) {
 	}
 }
 
+func TestNewSessionWithCommandAndEnvRejectsUnsafeUnsetKey(t *testing.T) {
+	for _, key := range []string{
+		"BEADS_BAD KEY",
+		"BEADS_BAD;touch /tmp/pwned",
+		"BEADS_BAD$(touch /tmp/pwned)",
+		"BEADS_BAD=other",
+		"-u",
+	} {
+		t.Run(key, func(t *testing.T) {
+			exec := &fakeExecutor{}
+			tm := NewTmux()
+			tm.exec = exec
+
+			err := tm.NewSessionWithCommandAndEnv("gc-test-invalid-env-key", "", "claude", map[string]string{key: ""})
+			if err == nil {
+				t.Fatalf("NewSessionWithCommandAndEnv accepted unsafe unset key %q", key)
+			}
+			if !strings.Contains(err.Error(), "invalid environment variable name") {
+				t.Fatalf("error = %v, want an environment-name validation error", err)
+			}
+			for _, call := range exec.calls {
+				if slices.Contains(call, "new-session") {
+					t.Fatalf("invalid unset key reached tmux new-session: %v", call)
+				}
+			}
+		})
+	}
+}
+
+func TestRespawnAgentRejectsUnsafeWithheldBeadsKey(t *testing.T) {
+	exec := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+	ops := &tmuxStartOps{tm: tm}
+
+	err := ops.respawnAgent("gc-test-invalid-env-key", "", "claude", map[string]string{
+		"BEADS_BAD;touch /tmp/pwned": "",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid environment variable name") {
+		t.Fatalf("respawnAgent error = %v, want an environment-name validation error", err)
+	}
+	if len(exec.calls) != 0 {
+		t.Fatalf("invalid withheld key reached tmux: %v", exec.calls)
+	}
+}
+
 type promptFooterExecutor struct {
 	calls [][]string
 }

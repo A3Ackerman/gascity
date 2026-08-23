@@ -116,6 +116,22 @@ func withNativeDoltOpenEnv(env map[string]string) (func(), error) {
 
 func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credentialCommand string) (func(), error) {
 	nativeDoltOpenEnvMu.Lock()
+	restore, err := withNativeDoltOpenEnvAndCredentialCommandLocked(env, credentialCommand)
+	if err != nil {
+		nativeDoltOpenEnvMu.Unlock()
+		return nil, err
+	}
+	return func() {
+		restore()
+		nativeDoltOpenEnvMu.Unlock()
+	}, nil
+}
+
+// withNativeDoltOpenEnvAndCredentialCommandLocked projects the scoped native
+// open environment while nativeDoltOpenEnvMu is already held. The lock-aware
+// form is used by hermetic opens, which must withhold the whole BEADS_ namespace
+// and project the selected keys as one indivisible environment transition.
+func withNativeDoltOpenEnvAndCredentialCommandLocked(env map[string]string, credentialCommand string) (func(), error) {
 	keys := nativeDoltOpenEnvKeys
 	if credentialCommand != "" {
 		keys = append(append([]string(nil), nativeDoltOpenEnvKeys...), "BEADS_DOLT_CREDENTIAL_COMMAND")
@@ -140,13 +156,11 @@ func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credential
 		}
 		if err != nil {
 			restoreNativeDoltOpenEnv(previous, keys)
-			nativeDoltOpenEnvMu.Unlock()
 			return nil, fmt.Errorf("projecting native Dolt open env %s: %w", key, err)
 		}
 	}
 	return func() {
 		restoreNativeDoltOpenEnv(previous, keys)
-		nativeDoltOpenEnvMu.Unlock()
 	}, nil
 }
 
@@ -163,15 +177,6 @@ func restoreNativeDoltOpenEnv(previous map[string]*string, keys []string) {
 // beadsEnvPrefix is the namespace the upstream library configures itself from.
 const beadsEnvPrefix = "BEADS_"
 
-// nativeDoltWithheldEnvMu serializes whole-namespace withholding.
-//
-// It is a second lock rather than the projection lock above because the two
-// cover different sets and nest: a withheld open still runs the scoped
-// projection inside itself, and one mutex would deadlock on the second take.
-// Taking them only in this order — withhold, then project — is what keeps that
-// nesting acyclic.
-var nativeDoltWithheldEnvMu sync.Mutex
-
 // withWithheldBeadsEnv unsets every ambient BEADS_-prefixed variable and
 // returns the restore.
 //
@@ -182,7 +187,23 @@ var nativeDoltWithheldEnvMu sync.Mutex
 // sure a workspace is served by its own configuration alone cannot maintain a
 // mirror of somebody else's environment surface, so it withholds the namespace.
 func withWithheldBeadsEnv() (func(), error) {
-	nativeDoltWithheldEnvMu.Lock()
+	nativeDoltOpenEnvMu.Lock()
+	restore, err := withWithheldBeadsEnvLocked()
+	if err != nil {
+		nativeDoltOpenEnvMu.Unlock()
+		return nil, err
+	}
+	return func() {
+		restore()
+		nativeDoltOpenEnvMu.Unlock()
+	}, nil
+}
+
+// withWithheldBeadsEnvLocked performs whole-namespace withholding while
+// nativeDoltOpenEnvMu is already held. Keeping this operation on the same lock
+// as snapshots and ordinary native opens makes the process environment appear
+// atomic to every caller that uses the guarded helpers.
+func withWithheldBeadsEnvLocked() (func(), error) {
 	type withheld struct{ key, value string }
 	var previous []withheld
 	restore := func() {
@@ -198,14 +219,48 @@ func withWithheldBeadsEnv() (func(), error) {
 		previous = append(previous, withheld{key: key, value: value})
 		if err := os.Unsetenv(key); err != nil {
 			restore()
-			nativeDoltWithheldEnvMu.Unlock()
 			return nil, fmt.Errorf("withholding ambient %s: %w", key, err)
 		}
 	}
 	return func() {
 		restore()
-		nativeDoltWithheldEnvMu.Unlock()
 	}, nil
+}
+
+// openNativeStorageWithoutAmbientEnvWithCredentialCommand opens native
+// storage while holding the same process-environment lock used by snapshots
+// and ordinary native opens. The whole BEADS_ namespace is withheld before
+// the selected scoped values are projected, and both restorations happen
+// before the lock is released.
+func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context, scopeRoot, credentialCommand string, readPrefix bool) (beadslib.Storage, string, error) {
+	nativeDoltOpenEnvMu.Lock()
+	defer nativeDoltOpenEnvMu.Unlock()
+
+	restoreNamespace, err := withWithheldBeadsEnvLocked()
+	if err != nil {
+		return nil, "", err
+	}
+	defer restoreNamespace()
+
+	restoreEnv, err := withNativeDoltOpenEnvAndCredentialCommandLocked(nil, credentialCommand)
+	if err != nil {
+		return nil, "", err
+	}
+	defer restoreEnv()
+
+	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	if err != nil {
+		return nil, "", err
+	}
+	var prefix string
+	if readPrefix {
+		prefix, err = storage.GetConfig(ctx, "issue_prefix")
+		if err != nil {
+			_ = storage.Close()
+			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
+		}
+	}
+	return storage, prefix, nil
 }
 
 // OpenNativeDoltStoreAtWithoutAmbientEnv opens a native store at scopeRoot with
@@ -217,12 +272,7 @@ func withWithheldBeadsEnv() (func(), error) {
 // be able to re-point it. Passing an empty scoped environment is not enough:
 // that clears only the variables gc itself projects.
 func OpenNativeDoltStoreAtWithoutAmbientEnv(ctx context.Context, scopeRoot string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
-	restore, err := withWithheldBeadsEnv()
-	if err != nil {
-		return nil, err
-	}
-	defer restore()
-	return newNativeDoltStoreAt(ctx, scopeRoot, nil, opts...)
+	return newNativeDoltStoreAtWithoutAmbientEnv(ctx, scopeRoot, "", opts...)
 }
 
 // OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand opens a native
@@ -239,12 +289,7 @@ func OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(ctx context.Con
 	if strings.TrimSpace(credentialCommand) == "" {
 		return nil, errors.New("native Dolt open credential command is empty")
 	}
-	restore, err := withWithheldBeadsEnv()
-	if err != nil {
-		return nil, err
-	}
-	defer restore()
-	return newNativeDoltStoreAtWithCredentialCommand(ctx, scopeRoot, nil, credentialCommand, opts...)
+	return newNativeDoltStoreAtWithoutAmbientEnv(ctx, scopeRoot, credentialCommand, opts...)
 }
 
 // NativeDoltStore is a Store implementation backed by the upstream beads
@@ -361,12 +406,40 @@ func newNativeDoltStoreAtWithCredentialCommand(parent context.Context, scopeRoot
 	return store, nil
 }
 
+func newNativeDoltStoreAtWithoutAmbientEnv(parent context.Context, scopeRoot, credentialCommand string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
+	ctx, cancel := nativeDoltOperationContext(parent)
+	defer cancel()
+	storage, prefix, err := openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx, scopeRoot, credentialCommand, true)
+	if err != nil {
+		return nil, err
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
+	store.localStrings = newLocalSidecar(filepath.Join(scopeRoot, ".beads", "local-strings.json"))
+	for _, opt := range opts {
+		opt(store)
+	}
+	return store, nil
+}
+
 // OpenNativeStorage opens a native Dolt storage handle for the given scope and
 // projected env. It is the building block for a NativeDoltStore reopen hook: a
 // caller that has re-resolved the CURRENT managed Dolt env (fresh port) passes
 // it here to get a fresh handle bound to the live server.
 func OpenNativeStorage(ctx context.Context, scopeRoot string, env map[string]string) (NativeStorage, error) {
 	storage, _, err := openNativeStorage(ctx, scopeRoot, env, false)
+	return storage, err
+}
+
+// OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand opens native
+// storage with the ambient BEADS_ namespace withheld and the selected
+// credential command projected for this one open. It is intended for a
+// NativeReopenFunc so a hosted workspace resolves a fresh short-lived
+// credential on every bounded reconnect attempt.
+func OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx context.Context, scopeRoot, credentialCommand string) (NativeStorage, error) {
+	if strings.TrimSpace(credentialCommand) == "" {
+		return nil, errors.New("native Dolt open credential command is empty")
+	}
+	storage, _, err := openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx, scopeRoot, credentialCommand, false)
 	return storage, err
 }
 
