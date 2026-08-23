@@ -1,9 +1,7 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -44,42 +42,37 @@ type liveWorktreeState struct {
 // standing up real processes.
 var collectLiveWorktreeStateFn = collectLiveWorktreeState
 
-// collectLiveWorktreeState walks /proc/<pid>/cwd for every process on the host
-// and records their canonical working directories. On a host without /proc (or
-// when the top-level /proc walk fails outright) it returns scanned=false so the
-// caller fails closed and reaps nothing.
+// collectLiveWorktreeState gathers the canonical working directories of every
+// live process. The gathering itself is PLATFORM-SPECIFIC and lives in
+// bead_worktree_liveness_procfs.go (/proc hosts) and
+// bead_worktree_liveness_darwin.go (macOS, which has no /proc). Both return
+// scanned=false when the enumeration cannot be trusted, so the caller fails
+// closed and reaps nothing.
 //
-// Per-process readlink failures are skipped, not fatal: a process may exit
-// mid-walk, and a process owned by another user may have a cwd this process
-// cannot resolve. The fleet runs every agent as the same user, so agent
-// worktree cwds are always visible here; the active-session-directory
-// cross-check plus the git-clean and closed-bead gates back-stop any process
-// this scan cannot see. This matches the dolt reaper's posture: the /proc
-// signal protects, it never authorizes a deletion the other gates would refuse.
-func collectLiveWorktreeState() liveWorktreeState {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return liveWorktreeState{scanned: false}
-	}
-	seen := make(map[string]struct{})
-	var cwds []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
+// ga-bq84cj: this used to BE the /proc walk, unconditionally. Darwin has no
+// /proc, so os.ReadDir("/proc") always errored, scanned was always false, and
+// the reaper fails closed on every run — it recorded 157k skip events and zero
+// reaps ever, while one closed polecat worktree alone held 19 GB. The
+// fail-closed posture was correct; making the only liveness signal /proc-only
+// is what turned a safety valve into an unconditional block.
+
+// normalizeLiveCWDs canonicalizes, filters and de-duplicates raw cwd strings
+// gathered by a platform scanner. Shared so both platforms agree on exactly
+// what a comparable cwd is.
+//
+// A cwd whose inode has been unlinked carries a trailing " (deleted)" marker on
+// Linux. The directory is gone, so it can never match a live worktree path on
+// disk — drop it rather than canonicalize a bogus path. (The rare live
+// directory literally named "... (deleted)" would be dropped too; that only
+// ever loses protection for a pathological path the fleet never creates, and
+// the git-clean gate still applies.)
+func normalizeLiveCWDs(raw []string) []string {
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, link := range raw {
+		if link == "" {
 			continue
 		}
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
-			continue // not a PID directory
-		}
-		link, err := os.Readlink(filepath.Join("/proc", entry.Name(), "cwd"))
-		if err != nil || link == "" {
-			continue
-		}
-		// A cwd whose inode has been unlinked carries a trailing " (deleted)"
-		// marker. The directory is gone, so it can never match a live worktree
-		// path on disk — drop it rather than canonicalize a bogus path. (The
-		// rare live directory literally named "... (deleted)" would be dropped
-		// too; that only ever loses protection for a pathological path the
-		// fleet never creates, and the git-clean gate still applies.)
 		if strings.HasSuffix(link, " (deleted)") {
 			continue
 		}
@@ -91,9 +84,9 @@ func collectLiveWorktreeState() liveWorktreeState {
 			continue
 		}
 		seen[canon] = struct{}{}
-		cwds = append(cwds, canon)
+		out = append(out, canon)
 	}
-	return liveWorktreeState{cwds: cwds, scanned: true}
+	return out
 }
 
 // worktreeIsLive reports whether any live signal sits at or beneath

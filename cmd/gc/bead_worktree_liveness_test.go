@@ -78,13 +78,22 @@ func TestWorktreeIsLive_NothingMatches(t *testing.T) {
 	}
 }
 
+// ga-bq84cj: this used to skip on everything but linux, because the scanner was
+// /proc-only. That made it permanently skipped on the platform the fleet actually
+// runs on — which is where the reaper was silently never reaping. darwin now has
+// its own scanner (bead_worktree_liveness_darwin.go), so this must RUN there;
+// leaving the skip in place would keep the fixed platform uncovered by the very
+// assertion that describes the bug.
 func TestCollectLiveWorktreeState_IncludesOwnCWD(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skipf("collectLiveWorktreeState relies on /proc; GOOS=%s has none", runtime.GOOS)
+	switch runtime.GOOS {
+	case "linux", "darwin":
+		// both have a real scanner
+	default:
+		t.Skipf("no process-cwd scanner implemented for GOOS=%s", runtime.GOOS)
 	}
 	live := collectLiveWorktreeState()
 	if !live.scanned {
-		t.Fatal("collectLiveWorktreeState scanned = false on linux, want true")
+		t.Fatalf("collectLiveWorktreeState scanned = false on %s, want true", runtime.GOOS)
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
