@@ -30,24 +30,52 @@ type WaiverExpiryWarning struct {
 	Reason      string
 }
 
-// WaiversExpiringWithin returns every waiver in entries whose expiry falls
-// inside [now, now+window), sorted by expiry then entry ID so repeated runs
-// render identically and a diffing consumer sees no spurious churn.
+// WaiversExpiringWithin returns waivers whose expiry falls inside
+// [now, now+window) — the ones about to lapse. Already-lapsed waivers are
+// reported by WaiversLapsed instead; callers are expected to render BOTH (see
+// the note on WaiversLapsed for why excluding the lapsed ones is a trap).
 //
-// ALREADY-EXPIRED waivers are deliberately EXCLUDED: those are Validate's job
-// and they are already failing the build loudly. This function answers the
-// narrower question "what is about to break", which is the one nothing was
-// asking on 2026-08-12.
+// Sorted by expiry then entry ID so repeated runs render identically and a
+// diffing consumer sees no spurious churn.
 func WaiversExpiringWithin(entries []Entry, now time.Time, window time.Duration) []WaiverExpiryWarning {
-	var out []WaiverExpiryWarning
 	deadline := now.Add(window)
+	return collectWaivers(entries, func(w *Waiver) bool {
+		return !w.Expires.Before(now) && w.Expires.Before(deadline)
+	})
+}
+
+// WaiversLapsed returns waivers that have ALREADY expired.
+//
+// These are included in the daily report deliberately, reversing an earlier
+// decision of mine to exclude them "because Validate is already loud about
+// them". Validate's loudness is exactly what failed for twelve days:
+// .github/workflows/ci.yml triggers on `push: branches: [main]` and
+// `pull_request`, this fork works on carry/operational, and Nightly's only
+// `go test` is ./test/acceptance/tier_c/... — so nothing runs this package
+// except a pull request, and PRs here are rare.
+//
+// Follow that through and the exclusion inverts: the T-14..T-1 window would be
+// reported daily and visible, and T-0 onward — the state that is actively
+// reddening every PR in the repo — would be reported by nothing until someone
+// happened to open one. The check would go QUIET at the moment the situation
+// became an outage.
+//
+// The noise objection that motivated the exclusion is already answered by the
+// caller's design: it opens-or-UPDATES a single issue, so a lapsed waiver keeps
+// one issue current. That is not spam, it is an open incident staying open.
+// Escalate rather than exclude.
+func WaiversLapsed(entries []Entry, now time.Time) []WaiverExpiryWarning {
+	return collectWaivers(entries, func(w *Waiver) bool {
+		return w.Expires.Before(now)
+	})
+}
+
+func collectWaivers(entries []Entry, keep func(*Waiver) bool) []WaiverExpiryWarning {
+	var out []WaiverExpiryWarning
 	for _, entry := range entries {
 		for _, claim := range entry.Claims {
 			w := claim.Waiver
-			if w == nil || w.Expires.Before(now) {
-				continue
-			}
-			if !w.Expires.Before(deadline) {
+			if w == nil || !keep(w) {
 				continue
 			}
 			out = append(out, WaiverExpiryWarning{
@@ -71,30 +99,58 @@ func WaiversExpiringWithin(entries []Entry, now time.Time, window time.Duration)
 	return out
 }
 
-// FormatWaiverExpiryWarnings renders warnings as an operator-facing report, or
-// "" when there is nothing to say. The empty string is the signal to callers
-// that no notification should be raised at all — a periodic "nothing to report"
-// is how a channel becomes unread, which is the failure this whole mechanism
-// exists to prevent.
+// FormatWaiverReport renders the operator-facing report, or "" when there is
+// nothing to say. The empty string is the signal to callers that no
+// notification should be raised at all — a periodic "nothing to report" is how
+// a channel becomes unread, which is the failure this mechanism exists to
+// prevent.
+//
+// LAPSED waivers are rendered FIRST and as an outage, because that is what they
+// are: while one is expired, Validate(Catalog) fails on every pull request in
+// the repo. Upcoming expiries follow as a horizon.
+//
 // The window is passed in rather than read from DefaultWaiverWarningWindow so
 // the header cannot claim a horizon the caller did not use — a report that
 // misstates its own window is worse than no report, because it is believed.
-func FormatWaiverExpiryWarnings(warnings []WaiverExpiryWarning, now time.Time, window time.Duration) string {
-	if len(warnings) == 0 {
+func FormatWaiverReport(lapsed, upcoming []WaiverExpiryWarning, now time.Time, window time.Duration) string {
+	if len(lapsed) == 0 && len(upcoming) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d provider-ledger waiver(s) expire within %d days of %s.\n",
-		len(warnings), int(window.Hours()/24), now.UTC().Format("2006-01-02"))
-	b.WriteString("When they expire, Validate(Catalog) fails and CI goes red for EVERY pull\n")
-	b.WriteString("request in this repo until it is dealt with.\n\n")
-	for _, w := range warnings {
-		days := int(w.Expires.Sub(now).Hours() / 24)
-		fmt.Fprintf(&b, "  %s  expires %s (%d days)  owner %s\n    constructor %s\n    reason: %s\n",
-			w.EntryID, w.Expires.UTC().Format("2006-01-02"), days, w.Owner, w.Constructor, w.Reason)
+
+	if len(lapsed) > 0 {
+		fmt.Fprintf(&b, "LAPSED: %d provider-ledger waiver(s) have ALREADY EXPIRED as of %s.\n",
+			len(lapsed), now.UTC().Format("2006-01-02"))
+		b.WriteString("Validate(Catalog) is failing RIGHT NOW, which reds CI for EVERY pull request\n")
+		b.WriteString("in this repo until it is dealt with — including changes that touch nothing\n")
+		b.WriteString("related. This is an outage, not a horizon.\n\n")
+		writeWaiverLines(&b, lapsed, now)
+		b.WriteString("\n")
 	}
-	b.WriteString("\nEither land the contract work and delete the waiver, or bump the horizon\n")
+
+	if len(upcoming) > 0 {
+		fmt.Fprintf(&b, "UPCOMING: %d provider-ledger waiver(s) expire within %d days of %s.\n",
+			len(upcoming), int(window.Hours()/24), now.UTC().Format("2006-01-02"))
+		b.WriteString("When they expire, Validate(Catalog) fails and CI goes red for EVERY pull\n")
+		b.WriteString("request in this repo until it is dealt with.\n\n")
+		writeWaiverLines(&b, upcoming, now)
+		b.WriteString("\n")
+	}
+
+	b.WriteString("Either land the contract work and delete the waiver, or bump the horizon\n")
 	b.WriteString("WITH a recorded reason (see runtimeContractWaiverExpiry in ledger.go).\n")
 	b.WriteString("Do not bump it bare: the expiry is the only mechanism making this debt visible.\n")
 	return b.String()
+}
+
+func writeWaiverLines(b *strings.Builder, warnings []WaiverExpiryWarning, now time.Time) {
+	for _, w := range warnings {
+		days := int(w.Expires.Sub(now).Hours() / 24)
+		when := fmt.Sprintf("%d days", days)
+		if days < 0 {
+			when = fmt.Sprintf("%d days AGO", -days)
+		}
+		fmt.Fprintf(b, "  %s  expires %s (%s)  owner %s\n    constructor %s\n    reason: %s\n",
+			w.EntryID, w.Expires.UTC().Format("2006-01-02"), when, w.Owner, w.Constructor, w.Reason)
+	}
 }

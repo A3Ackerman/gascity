@@ -39,13 +39,16 @@ func TestWaiversExpiringWithin(t *testing.T) {
 		}
 	})
 
-	// An already-expired waiver is Validate's job and is already failing the
-	// build loudly. Reporting it here too would make the advance warning fire
-	// forever after an expiry, which is how a channel stops being read.
-	t.Run("already expired is left to Validate", func(t *testing.T) {
-		got := WaiversExpiringWithin(horizonTestEntries(now.Add(-time.Hour)), now, DefaultWaiverWarningWindow)
-		if len(got) != 0 {
-			t.Fatalf("got %d warnings for an EXPIRED waiver, want 0", len(got))
+	// WaiversExpiringWithin answers "about to lapse" only. An already-lapsed
+	// waiver belongs to WaiversLapsed — NOT to nobody, which is what an earlier
+	// version of this file asserted. See TestWaiversLapsed.
+	t.Run("already expired belongs to WaiversLapsed, not here", func(t *testing.T) {
+		entries := horizonTestEntries(now.Add(-time.Hour))
+		if got := WaiversExpiringWithin(entries, now, DefaultWaiverWarningWindow); len(got) != 0 {
+			t.Fatalf("got %d upcoming warnings for an EXPIRED waiver, want 0", len(got))
+		}
+		if got := WaiversLapsed(entries, now); len(got) != 1 {
+			t.Fatalf("WaiversLapsed got %d, want 1 — an expired waiver must be reported by SOMETHING", len(got))
 		}
 	})
 
@@ -71,22 +74,54 @@ func TestWaiversExpiringWithin(t *testing.T) {
 	})
 }
 
-func TestFormatWaiverExpiryWarnings(t *testing.T) {
+// TestLapsedWaiverIsReportedNotSilent is the regression for the hole this file
+// briefly had: the daily report is the ONLY surface that runs this package on a
+// schedule (ci.yml triggers on push-to-main and pull_request; this fork works on
+// carry/operational and Nightly does not cover this package). So if the report
+// omits lapsed waivers, the check goes quiet at exactly the moment the situation
+// becomes an outage.
+func TestLapsedWaiverIsReportedNotSilent(t *testing.T) {
+	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	entries := horizonTestEntries(now.Add(-12 * 24 * time.Hour))
+
+	report := FormatWaiverReport(
+		WaiversLapsed(entries, now),
+		WaiversExpiringWithin(entries, now, DefaultWaiverWarningWindow),
+		now, DefaultWaiverWarningWindow)
+
+	if report == "" {
+		t.Fatal("a LAPSED waiver produced an empty report — the check went silent during an outage")
+	}
+	for _, want := range []string{"LAPSED", "ALREADY EXPIRED", "12 days AGO", "outage, not a horizon"} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("lapsed report missing %q:\n%s", want, report)
+		}
+	}
+	if strings.Contains(report, "UPCOMING") {
+		t.Fatalf("a lapsed-only report must not claim an upcoming horizon:\n%s", report)
+	}
+}
+
+func TestFormatWaiverReport(t *testing.T) {
 	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
 
 	// Empty MUST render empty: the caller treats "" as "raise no notification".
 	// A periodic all-clear is how a channel becomes unread, which is the exact
 	// failure this mechanism exists to prevent.
-	if got := FormatWaiverExpiryWarnings(nil, now, DefaultWaiverWarningWindow); got != "" {
+	if got := FormatWaiverReport(nil, nil, now, DefaultWaiverWarningWindow); got != "" {
 		t.Fatalf("empty warnings rendered %q, want empty", got)
 	}
 
-	got := FormatWaiverExpiryWarnings(
-		WaiversExpiringWithin(horizonTestEntries(now.Add(3*24*time.Hour)), now, DefaultWaiverWarningWindow), now, DefaultWaiverWarningWindow)
+	got := FormatWaiverReport(nil,
+		WaiversExpiringWithin(horizonTestEntries(now.Add(3*24*time.Hour)), now, DefaultWaiverWarningWindow),
+		now, DefaultWaiverWarningWindow)
 	for _, want := range []string{"expire within 14 days", "2026-08-27", "ga-80po0c.3", "EVERY pull", "Do not bump it bare"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("report missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "LAPSED") {
+		t.Fatalf("an upcoming-only report must not claim a lapse:\n%s", got)
 	}
 }
 
@@ -94,7 +129,7 @@ func TestFormatWaiverExpiryWarnings(t *testing.T) {
 func TestFormatWaiverExpiryWarningsReportsTheWindowItWasGiven(t *testing.T) {
 	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
 	window := 60 * 24 * time.Hour
-	got := FormatWaiverExpiryWarnings(
+	got := FormatWaiverReport(nil,
 		WaiversExpiringWithin(horizonTestEntries(now.Add(30*24*time.Hour)), now, window), now, window)
 	if !strings.Contains(got, "within 60 days") {
 		t.Fatalf("header must report the window actually used, got:\n%s", got)
@@ -108,8 +143,11 @@ func TestFormatWaiverExpiryWarningsReportsTheWindowItWasGiven(t *testing.T) {
 // reports rather than fails: failing here would red every PR for the 14 days
 // BEFORE an expiry, which is the same disease in an earlier costume.
 func TestLiveCatalogWaiverHorizon(t *testing.T) {
-	report := FormatWaiverExpiryWarnings(
-		WaiversExpiringWithin(Catalog(), time.Now(), DefaultWaiverWarningWindow), time.Now(), DefaultWaiverWarningWindow)
+	now := time.Now()
+	report := FormatWaiverReport(
+		WaiversLapsed(Catalog(), now),
+		WaiversExpiringWithin(Catalog(), now, DefaultWaiverWarningWindow),
+		now, DefaultWaiverWarningWindow)
 	if report == "" {
 		return
 	}

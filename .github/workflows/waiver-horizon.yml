@@ -12,9 +12,17 @@
 # a warning added there would arrive in a channel nobody reads. Issues are tended
 # here (auto-label and stale-bot workflows act on them).
 #
-# It is silent unless something is actually about to expire. A periodic
-# "nothing to report" is how a channel becomes unread, which is the failure
-# this workflow exists to prevent.
+# It is silent unless there is something to say. A periodic "nothing to report"
+# is how a channel becomes unread, which is the failure this workflow exists to
+# prevent.
+#
+# It reports ALREADY-LAPSED waivers as well as upcoming ones, and that is
+# load-bearing rather than belt-and-braces: ci.yml triggers on
+# `push: branches: [main]` and `pull_request`, this fork works on
+# carry/operational, and Nightly does not cover this package. So after an expiry
+# NOTHING else announces it until somebody opens a PR — which took twelve days
+# last time. Omitting the lapsed case would make this check go quiet at exactly
+# the moment the situation became an outage.
 name: Waiver horizon
 
 on:
@@ -63,8 +71,17 @@ jobs:
           script: |
             const fs = require('fs');
             const report = fs.readFileSync('/tmp/waiver-horizon.txt', 'utf8');
-            const title = 'Provider-ledger waivers are approaching expiry';
+            // The title escalates with severity, so issue reuse keys off a
+            // hidden marker in the BODY rather than the title text. Matching on
+            // title would either freeze the title (under-signalling a lapse) or
+            // open a second issue the moment it changed.
+            const marker = '<!-- waiver-horizon-issue -->';
+            const lapsed = report.startsWith('LAPSED:');
+            const title = lapsed
+              ? 'Provider-ledger waivers have EXPIRED — CI is red for every PR'
+              : 'Provider-ledger waivers are approaching expiry';
             const body = [
+              marker,
               report,
               '',
               'When these expire, `Validate(Catalog)` fails and CI goes red for every pull',
@@ -87,13 +104,14 @@ jobs:
               state: 'open',
               per_page: 100,
             });
-            const match = existing.find((i) => !i.pull_request && i.title === title);
+            const match = existing.find((i) => !i.pull_request && (i.body || '').includes(marker));
 
             if (match) {
               await github.rest.issues.update({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: match.number,
+                title,
                 body,
               });
               core.info(`Updated existing issue #${match.number}`);

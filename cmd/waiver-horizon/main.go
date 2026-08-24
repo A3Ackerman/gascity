@@ -7,8 +7,10 @@
 // and went unnoticed for twelve days (ga-9hrf8b) — CI here runs on
 // pull_request only, so nothing was watching the calendar.
 //
-// Prints a report to stdout when something expires inside the warning window,
-// and prints NOTHING otherwise. Callers treat empty output as "raise no
+// Prints a report to stdout when a waiver has already lapsed OR expires inside
+// the warning window, and prints NOTHING otherwise. Lapsed waivers are included
+// deliberately: CI here runs on pull_request only, so after an expiry nothing
+// else announces it until somebody opens a PR. Callers treat empty output as "raise no
 // notification": a periodic all-clear is how a channel stops being read, which
 // is the failure this command exists to prevent.
 package main
@@ -27,9 +29,12 @@ func main() {
 		"how far ahead to look for expiring waivers")
 	flag.Parse()
 
-	report := providerledger.FormatWaiverExpiryWarnings(
-		providerledger.WaiversExpiringWithin(providerledger.Catalog(), time.Now(), *window),
-		time.Now(), *window,
+	now := time.Now()
+	catalog := providerledger.Catalog()
+	report := providerledger.FormatWaiverReport(
+		providerledger.WaiversLapsed(catalog, now),
+		providerledger.WaiversExpiringWithin(catalog, now, *window),
+		now, *window,
 	)
 	if report == "" {
 		return
