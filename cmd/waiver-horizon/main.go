@@ -39,5 +39,12 @@ func main() {
 	if report == "" {
 		return
 	}
-	fmt.Fprint(os.Stdout, report)
+	// A short write to stdout is a real failure mode for this command: the
+	// workflow reads the report off stdout and decides whether to raise an
+	// incident from it, so a silently truncated write would understate a lapse
+	// in the one channel that is supposed to announce it.
+	if _, err := fmt.Fprint(os.Stdout, report); err != nil {
+		fmt.Fprintf(os.Stderr, "waiver-horizon: writing report: %v\n", err) //nolint:errcheck // stderr is best-effort
+		os.Exit(1)
+	}
 }
