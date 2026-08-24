@@ -1,0 +1,108 @@
+# Advance warning for expiring provider-ledger waivers.
+#
+# The waiver expiry is a wall-clock gate on EVERY pull request in this repo:
+# when one lapses, Validate(Catalog) fails and CI goes red for everyone,
+# regardless of what their change touches. On 2026-08-12 exactly that happened
+# and nobody noticed for twelve days (ga-9hrf8b), because CI here runs on
+# pull_request only and this repo sees few PRs — the deadline arrived with no
+# surface watching it.
+#
+# This routes the warning to a GitHub ISSUE deliberately, and not to the Nightly
+# or Mac Regression workflows: both of those are currently failing every run, so
+# a warning added there would arrive in a channel nobody reads. Issues are tended
+# here (auto-label and stale-bot workflows act on them).
+#
+# It is silent unless something is actually about to expire. A periodic
+# "nothing to report" is how a channel becomes unread, which is the failure
+# this workflow exists to prevent.
+name: Waiver horizon
+
+on:
+  schedule:
+    - cron: '17 8 * * *'
+  workflow_dispatch:
+    inputs:
+      window:
+        description: 'Look-ahead window (Go duration, e.g. 336h)'
+        required: false
+        default: '336h'
+
+permissions: {}
+
+jobs:
+  warn:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Check the waiver horizon
+        id: check
+        env:
+          WINDOW: ${{ inputs.window || '336h' }}
+        run: |
+          set -euo pipefail
+          go run ./cmd/waiver-horizon -window "$WINDOW" > /tmp/waiver-horizon.txt
+          if [ -s /tmp/waiver-horizon.txt ]; then
+            echo "expiring=true" >> "$GITHUB_OUTPUT"
+            cat /tmp/waiver-horizon.txt
+          else
+            echo "expiring=false" >> "$GITHUB_OUTPUT"
+            echo "No provider-ledger waiver expires inside the window."
+          fi
+
+      - name: Open or update the warning issue
+        if: steps.check.outputs.expiring == 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('/tmp/waiver-horizon.txt', 'utf8');
+            const title = 'Provider-ledger waivers are approaching expiry';
+            const body = [
+              report,
+              '',
+              'When these expire, `Validate(Catalog)` fails and CI goes red for every pull',
+              'request in this repo until it is dealt with.',
+              '',
+              'Either land the contract work and delete the waivers, or bump',
+              '`runtimeContractWaiverExpiry` in `internal/testutil/providerledger/ledger.go`',
+              'WITH a recorded reason. Do not bump it bare — the expiry is the only',
+              'mechanism making this debt visible.',
+              '',
+              `_Updated by the Waiver horizon workflow, run ${context.runId}._`,
+            ].join('\n');
+
+            // Reuse one issue rather than opening a new one each day: a daily
+            // duplicate is indistinguishable from noise and gets muted, which
+            // defeats the point of routing this to a surface people read.
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const match = existing.find((i) => !i.pull_request && i.title === title);
+
+            if (match) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: match.number,
+                body,
+              });
+              core.info(`Updated existing issue #${match.number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+              core.info(`Opened issue #${created.data.number}`);
+            }
