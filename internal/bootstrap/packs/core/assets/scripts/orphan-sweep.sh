@@ -323,6 +323,40 @@ LOCAL_BINDINGS=$(printf '%s\n' "$AGENTS" | awk '
         }
     }' ) || LOCAL_BINDINGS=""
 
+# ROSTER_IS_UNQUALIFIED — the roster carries no rig scope at all.
+#
+# $AGENTS normally comes from `gc config explain`, which emits
+# Agent.QualifiedName() ("qcore/cherub-law.krieger"). On OLDER BINARIES that
+# command does not exist and the fallback parser above reads `gc config show`,
+# which yields only each agent's BARE name — the rig scope is discarded before
+# this code ever sees it.
+#
+# That is load-bearing for the guard: with a bare-only roster, NO rig-qualified
+# assignee can match, so every locally configured agent — including this city's
+# own named crew — is classified foreign and its dead claims are protected
+# forever. Measured on a simulated fallback roster {worker, polecat, krieger}:
+# project/worker, qcore/krieger AND qcore/dalinar were all protected. That is the
+# stranding defect this guard was narrowed to avoid, returning through a path
+# nobody was looking at.
+#
+# The population that hits this is precisely the one running older gc — the same
+# deployments most likely to install a core-pack fix without updating anything
+# else. So the rare-path assumption behind a low severity does not hold for the
+# audience this change is aimed at.
+#
+# In that mode the rig information does not exist and cannot be reconstructed, so
+# matching falls back to the LEAF. ACCEPTED LIMITATION, stated rather than hidden:
+# a foreign "other-rig/worker" is then indistinguishable from a local
+# "local-rig/worker" and is released. That is strictly better than the
+# alternatives — protecting it would strand local work on every old deployment,
+# and disabling the guard entirely would protect nothing at all. Foreign crew
+# names whose leaf is unknown locally (the shape both observed incidents took)
+# are still protected.
+ROSTER_IS_UNQUALIFIED=1
+case "$AGENTS" in
+    */*) ROSTER_IS_UNQUALIFIED=0 ;;
+esac
+
 agent_public_form_exists() {
     local candidate="$1"
     [ -n "$candidate" ] && printf '%s\n' "$AGENT_PUBLIC_FORMS" | grep -Fxq -- "$candidate"
@@ -367,6 +401,18 @@ is_locally_configured_identity() {
     local stripped
     stripped=$(strip_instance_suffix "$name")
     if [ "$stripped" != "$name" ] && agent_public_form_exists "$stripped"; then return 0; fi
+
+    # Degraded roster (see ROSTER_IS_UNQUALIFIED): no rig scope exists anywhere,
+    # so match the leaf or every qualified local agent reads as foreign.
+    if [ "$ROSTER_IS_UNQUALIFIED" = "1" ]; then
+        local bare="${name##*/}"
+        if [ "$bare" != "$name" ]; then
+            if agent_public_form_exists "$bare"; then return 0; fi
+            local bare_stripped
+            bare_stripped=$(strip_instance_suffix "$bare")
+            if [ "$bare_stripped" != "$bare" ] && agent_public_form_exists "$bare_stripped"; then return 0; fi
+        fi
+    fi
 
     # Binding-qualified leaf: "<rig>/<binding>.<anything>" where <binding> is an
     # import this city uses. Covers namepool instances, which the roster cannot
