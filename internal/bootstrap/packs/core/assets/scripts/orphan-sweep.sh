@@ -300,24 +300,28 @@ reset_orphan_if_current() {
 # Without this, every dead polecat claim would be protected forever and the
 # sweep would stop doing its actual job.
 AGENT_PUBLIC_FORMS=$(printf '%s\n' "$AGENTS" | awk '
+    function emit(v) { if (v != "" && !seen[v]++) { print v } }
     NF {
-        print $0
+        emit($0)
         rig = ""; leaf = $0
         i = index($0, "/")
         if (i > 0) { rig = substr($0, 1, i - 1); leaf = substr($0, i + 1) }
         n = leaf
         while (index(n, ".") > 0) { n = substr(n, index(n, ".") + 1) }
-        if (rig != "") { print rig "/" n }
-        print n
-    }' | sort -u) || AGENT_PUBLIC_FORMS="$AGENTS"
+        if (rig != "") { emit(rig "/" n) }
+        emit(n)
+    }' ) || AGENT_PUBLIC_FORMS="$AGENTS"
 
 LOCAL_BINDINGS=$(printf '%s\n' "$AGENTS" | awk '
     NF {
         leaf = $0
         i = index($0, "/")
         if (i > 0) { leaf = substr($0, i + 1) }
-        if (index(leaf, ".") > 0) { print substr(leaf, 1, index(leaf, ".") - 1) }
-    }' | sort -u) || LOCAL_BINDINGS=""
+        if (index(leaf, ".") > 0) {
+            b = substr(leaf, 1, index(leaf, ".") - 1)
+            if (b != "" && !seen[b]++) { print b }
+        }
+    }' ) || LOCAL_BINDINGS=""
 
 agent_public_form_exists() {
     local candidate="$1"
@@ -404,8 +408,34 @@ is_foreign_qualified_identity() {
     [ "$rig" = "$name" ] && return 1
     [ -z "$rig" ] && return 1
     [ -z "$leaf" ] && return 1
+    # DELIBERATE NARROWING: only a BARE leaf qualifies. "<rig>/<binding>.<name>"
+    # is an identity minted by a PACK IMPORT, and a binding this city does not
+    # import is ambiguous — it is equally consistent with another city's pack and
+    # with a LOCAL import that has since been retired. Protecting that shape
+    # would strand a stale local agent's work forever on every single-city
+    # deployment, which is the overwhelming majority of them, and this script
+    # runs on all of them. The existing contract (a stale qualified local
+    # assignee is still cleaned up) is preserved rather than changed under a
+    # core pack.
+    # "<rig>/<bare-name>" is by contrast a NAMED SESSION public identity — the
+    # crew-name shape. A crew name this city does not configure is another
+    # city's crew, and that is precisely the shape both observed incidents took
+    # (qcore/dalinar, qcore/pattern, qcore/szeth inbound; qcore/barry,
+    # qcore/lana outbound).
+    # RESIDUAL, stated rather than hidden: a foreign POOL instance
+    # ("westeros/gastown.furiosa") is not protected by this. It is already
+    # unprotectable by roster membership anyway, because two cities importing the
+    # same pack share that identity space verbatim.
+    case "$leaf" in
+        *.*) return 1 ;;
+    esac
+    # Match the FULL <rig>/<name>, never the bare leaf. Stripping the rig would
+    # let a foreign "other-rig/worker" match this city's bare "worker" form and
+    # fall through to be reset — preserving the very cross-city defect this guard
+    # exists to close whenever two cities share a common agent leaf under
+    # different rig prefixes. The rig prefix is signal here; it is only useless
+    # as a SOLE discriminator (the shared rig is common to both cities).
     if is_locally_configured_identity "$name"; then return 1; fi
-    if is_locally_configured_identity "$leaf"; then return 1; fi
     return 0
 }
 
@@ -539,30 +569,43 @@ fi
 # stops being read. Identities are sorted so consecutive sweeps are comparable,
 # and each carries its claim count plus a bounded sample of bead ids.
 if [ "$PROTECTED" -gt 0 ]; then
-    PROTECTED_DETAIL=""
+    # One POSIX awk pass, and deliberately NO external sort/cut/wc: this script
+    # runs under a restricted PATH in the pack test harness, where `sort` is not
+    # present. Depending on it printed "sort: command not found" to stderr on
+    # every run and broke six existing subtests. awk is already a hard dependency
+    # of this script; nothing new is assumed.
+    PROTECTED_SUMMARY=""
     if [ -n "$PROTECTED_TMP" ] && [ -s "$PROTECTED_TMP" ]; then
-        # POSIX awk only — no asorti(), which is a gawk extension and absent from
-        # the BSD awk on macOS, where this order runs on the operator's box.
-        # Pre-sorting makes each identity's rows contiguous AND alphabetical, so a
-        # single forward pass emits deterministic output with no in-awk sorting.
-        PROTECTED_DETAIL=$(sort "$PROTECTED_TMP" | awk -F'\t' '
-            function flush(   extra, entry) {
-                if (cur == "") { return }
-                extra = (n > 5) ? sprintf(" +%d more", n - 5) : ""
-                entry = sprintf("%s (%d: %s%s)", cur, n, ids, extra)
-                out = (out == "" ? entry : out ", " entry)
-            }
+        PROTECTED_SUMMARY=$(awk -F'\t' '
             {
-                if ($1 != cur) { flush(); cur = $1; n = 0; ids = "" }
-                n++
-                if (n <= 5) { ids = (ids == "" ? $2 : ids ", " $2) }
+                if (!($1 in count)) { keys[++nkeys] = $1 }
+                count[$1]++
+                if (count[$1] <= 5) { ids[$1] = (ids[$1] == "" ? $2 : ids[$1] ", " $2) }
             }
-            END { flush(); printf "%s", out }' 2>/dev/null) || PROTECTED_DETAIL=""
+            END {
+                # Insertion sort over the key list so consecutive sweeps render
+                # comparably. asorti() is a gawk extension and absent from the BSD
+                # awk on macOS, where this order runs on the operator box.
+                for (i = 2; i <= nkeys; i++) {
+                    k = keys[i]
+                    for (j = i - 1; j >= 1 && keys[j] > k; j--) { keys[j + 1] = keys[j] }
+                    keys[j + 1] = k
+                }
+                out = ""
+                for (i = 1; i <= nkeys; i++) {
+                    k = keys[i]
+                    extra = (count[k] > 5) ? sprintf(" +%d more", count[k] - 5) : ""
+                    entry = sprintf("%s (%d: %s%s)", k, count[k], ids[k], extra)
+                    out = (out == "" ? entry : out ", " entry)
+                }
+                printf "%d\t%s", nkeys, out
+            }' "$PROTECTED_TMP" 2>/dev/null) || PROTECTED_SUMMARY=""
     fi
-    IDENTITY_COUNT=0
-    if [ -n "$PROTECTED_TMP" ] && [ -s "$PROTECTED_TMP" ]; then
-        IDENTITY_COUNT=$(cut -f1 "$PROTECTED_TMP" | sort -u | wc -l | tr -d ' ')
-    fi
+    IDENTITY_COUNT="${PROTECTED_SUMMARY%%	*}"
+    PROTECTED_DETAIL="${PROTECTED_SUMMARY#*	}"
+    case "$IDENTITY_COUNT" in
+        ''|*[!0-9]*) IDENTITY_COUNT=0; PROTECTED_DETAIL="" ;;
+    esac
     if [ -n "$PROTECTED_DETAIL" ]; then
         echo "orphan-sweep: protected $IDENTITY_COUNT foreign/unknown identities this pass ($PROTECTED claims): $PROTECTED_DETAIL"
     else
