@@ -408,6 +408,19 @@ is_foreign_qualified_identity() {
     [ "$rig" = "$name" ] && return 1
     [ -z "$rig" ] && return 1
     [ -z "$leaf" ] && return 1
+    # WELL-FORMED means exactly one slash and two components drawn from the agent
+    # identity grammar — not merely "contains a slash". Without this, anything
+    # slash-shaped is protected: "a/b/c", "a//worker", "./worker" and
+    # "/tmp/worker" all split into a rig and a dotless leaf and would be treated
+    # as another city's crew, stranding malformed LOCAL claims forever. The rig
+    # is taken from the LAST slash, so a nested path leaves separators in $rig
+    # and is rejected here.
+    case "$rig" in
+        *[!A-Za-z0-9_-]*) return 1 ;;
+    esac
+    case "$leaf" in
+        *[!A-Za-z0-9_-]*) return 1 ;;
+    esac
     # DELIBERATE NARROWING: only a BARE leaf qualifies. "<rig>/<binding>.<name>"
     # is an identity minted by a PACK IMPORT, and a binding this city does not
     # import is ambiguous — it is equally consistent with another city's pack and
@@ -426,9 +439,9 @@ is_foreign_qualified_identity() {
     # ("westeros/gastown.furiosa") is not protected by this. It is already
     # unprotectable by roster membership anyway, because two cities importing the
     # same pack share that identity space verbatim.
-    case "$leaf" in
-        *.*) return 1 ;;
-    esac
+    # (A dotted leaf is already rejected by the grammar check above: '.' is not
+    # in the permitted character set. Kept explicit in the comment because the
+    # NARROWING is a deliberate design choice, not a side effect of the grammar.)
     # Match the FULL <rig>/<name>, never the bare leaf. Stripping the rig would
     # let a foreign "other-rig/worker" match this city's bare "worker" form and
     # fall through to be reset — preserving the very cross-city defect this guard
@@ -458,7 +471,22 @@ record_protected_identity() {
     local identity="$1"
     local bead="$2"
     PROTECTED=$((PROTECTED + 1))
-    [ -n "$PROTECTED_TMP" ] && printf '%s\t%s\n' "$identity" "$bead" >>"$PROTECTED_TMP"
+    # A tab or newline inside either value would re-key the grouping or forge an
+    # extra record in the summary, which is the ONLY signal that a decommissioned
+    # local agent is leaking. Neutralise rather than trust the input: these are
+    # read off beads that another city may have written.
+    identity=${identity//$'\t'/ }
+    identity=${identity//$'\n'/ }
+    bead=${bead//$'\t'/ }
+    bead=${bead//$'\n'/ }
+    if [ -n "$PROTECTED_TMP" ]; then
+        printf '%s\t%s\n' "$identity" "$bead" >>"$PROTECTED_TMP" || PROTECTED_TMP=""
+    fi
+    # MUST return 0: this is called unguarded in the sweep loop, and under
+    # `set -e` a function whose last command fails (no temp file, or a failed
+    # write) would terminate the entire sweep — turning a degraded summary into
+    # a dead patrol.
+    return 0
 }
 
 is_known_agent() {
@@ -575,8 +603,9 @@ if [ "$PROTECTED" -gt 0 ]; then
     # every run and broke six existing subtests. awk is already a hard dependency
     # of this script; nothing new is assumed.
     PROTECTED_SUMMARY=""
+    PROTECTED_SUMMARY_FAILED=0
     if [ -n "$PROTECTED_TMP" ] && [ -s "$PROTECTED_TMP" ]; then
-        PROTECTED_SUMMARY=$(awk -F'\t' '
+        if ! PROTECTED_SUMMARY=$(awk -F'\t' '
             {
                 if (!($1 in count)) { keys[++nkeys] = $1 }
                 count[$1]++
@@ -599,16 +628,34 @@ if [ "$PROTECTED" -gt 0 ]; then
                     out = (out == "" ? entry : out ", " entry)
                 }
                 printf "%d\t%s", nkeys, out
-            }' "$PROTECTED_TMP" 2>/dev/null) || PROTECTED_SUMMARY=""
+            }' "$PROTECTED_TMP"); then
+            PROTECTED_SUMMARY_FAILED=1
+            PROTECTED_SUMMARY=""
+        fi
+    elif [ "$PROTECTED" -gt 0 ]; then
+        # Claims were protected but nothing reached the spool — the temp file was
+        # unavailable or a write failed. That is a failure, not a zero.
+        PROTECTED_SUMMARY_FAILED=1
     fi
     IDENTITY_COUNT="${PROTECTED_SUMMARY%%	*}"
     PROTECTED_DETAIL="${PROTECTED_SUMMARY#*	}"
     case "$IDENTITY_COUNT" in
         ''|*[!0-9]*) IDENTITY_COUNT=0; PROTECTED_DETAIL="" ;;
     esac
-    if [ -n "$PROTECTED_DETAIL" ]; then
-        echo "orphan-sweep: protected $IDENTITY_COUNT foreign/unknown identities this pass ($PROTECTED claims): $PROTECTED_DETAIL"
-    else
-        echo "orphan-sweep: protected $IDENTITY_COUNT foreign/unknown identities this pass ($PROTECTED claims)"
+    # A FAILED summary must never render as "0 identities". The count is the only
+    # evidence that a decommissioned local agent is accumulating protected
+    # claims, so reporting zero when the aggregation broke would suppress exactly
+    # the signal this mechanism exists to produce — and it would contradict the
+    # claim count printed beside it. Say it is unavailable instead. awk's stderr
+    # is deliberately NOT discarded so the cause is visible.
+    if [ "$PROTECTED_SUMMARY_FAILED" = "1" ]; then
+        echo "orphan-sweep: protected $PROTECTED claims this pass, but the per-identity summary is UNAVAILABLE (aggregation failed; see stderr above) — identities NOT listed"
+    fi
+    if [ "$PROTECTED_SUMMARY_FAILED" != "1" ]; then
+        if [ -n "$PROTECTED_DETAIL" ]; then
+            echo "orphan-sweep: protected $IDENTITY_COUNT foreign/unknown identities this pass ($PROTECTED claims): $PROTECTED_DETAIL"
+        else
+            echo "orphan-sweep: protected $IDENTITY_COUNT foreign/unknown identities this pass ($PROTECTED claims)"
+        fi
     fi
 fi
