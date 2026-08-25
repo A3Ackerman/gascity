@@ -1102,7 +1102,7 @@ transitive = false
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doImportCheck(dir, &stdout, &stderr)
+	code := doImportCheck(dir, &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
@@ -1143,7 +1143,7 @@ version = "^1.0"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doImportCheck(dir, &stdout, &stderr)
+	code := doImportCheck(dir, &stdout, &stderr, false)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
