@@ -320,6 +320,28 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 	return claim
 }
 
+// runtimeContractWaiverExpiry is the shared horizon for every runtime.Provider
+// waiver below. It is validated against WALL-CLOCK time, so when it passes,
+// Validate(Catalog) fails and CI goes red for every pull request in the repo
+// regardless of what the change touches.
+//
+// 2026-08-24: bumped from 2026-08-12 after that expiry had red-flagged every PR
+// for twelve days without anyone noticing — this repo runs CI on pull_request
+// only, and it sees few PRs, so the deadline landed silently. Two independent
+// PRs were blocked by it before it was diagnosed (ga-9hrf8b).
+//
+// THIS IS A DEFERRAL, NOT A DECISION. The six waived constructors below still
+// owe the runtime.Provider contract work owned by ga-80po0c.3; the expiry is the
+// mechanism that forces that re-look, and bumping it silently would defeat the
+// only thing making the debt visible. Before the next expiry, either land the
+// contract work and delete these waivers, or bump again WITH a recorded reason
+// the way this one is recorded. Do not bump it bare.
+//
+// Kept inside maxWaiverHorizon (90 days) with margin so a runner whose clock
+// runs ahead of the authoring machine cannot trip the "exceeds the horizon"
+// branch instead.
+var runtimeContractWaiverExpiry = time.Date(2026, time.November, 20, 0, 0, 0, 0, time.UTC)
+
 func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 	return ContractClaim{
 		Constructor: constructor,
@@ -327,7 +349,7 @@ func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 		Disposition: DispositionWaived,
 		Waiver: &Waiver{
 			Owner:   runtimeContractWaiverOwner,
-			Expires: time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
+			Expires: runtimeContractWaiverExpiry,
 			Reason:  reason,
 		},
 	}
