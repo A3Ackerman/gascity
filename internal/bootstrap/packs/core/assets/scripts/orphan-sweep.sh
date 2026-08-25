@@ -103,9 +103,19 @@ fi
 # Step 2: Get all known agent identities from resolved config.
 # `gc config explain` prints Agent.QualifiedName(), including import binding
 # and rig scope. Fall back to the older config-show parser for older binaries.
+# ROSTER_FROM_FALLBACK records whether the rig scope was LOST, and is set at the
+# point the fallback is actually taken. It must not be inferred from the roster's
+# shape: a modern city whose agents are all city-scoped legitimately emits bare
+# names from `gc config explain`, because Agent.QualifiedName() omits the rig when
+# Dir is empty. Treating "no slash anywhere" as evidence of the fallback would
+# enable degraded leaf matching on a city that lost nothing — and a foreign
+# "qcore/worker" would then match a local city-scoped "worker" and be released,
+# reopening the cross-city defect this guard exists to close.
+ROSTER_FROM_FALLBACK=0
 AGENTS=$(gc config explain 2>/dev/null | awk '/^Agent: /{print $2}') || AGENTS=""
 if [ -z "$AGENTS" ]; then
     AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^[[:space:]]*name[[:space:]]*=/{print; a=0}' | sed 's/.*=[[:space:]]*"\(.*\)"/\1/') || exit 0
+    ROSTER_FROM_FALLBACK=1
 fi
 if [ -z "$AGENTS" ]; then
     exit 0
@@ -323,6 +333,30 @@ LOCAL_BINDINGS=$(printf '%s\n' "$AGENTS" | awk '
         }
     }' ) || LOCAL_BINDINGS=""
 
+# The degraded-roster mode below keys off ROSTER_FROM_FALLBACK, set above at the
+# point `gc config show` is actually used. See that comment for why the roster's
+# SHAPE cannot stand in for the fact of the fallback.
+#
+# Why the mode is needed at all: `gc config show` yields only each agent's BARE
+# name, so with that roster no rig-qualified assignee can match and EVERY locally
+# configured agent is classified foreign, its dead claims protected forever.
+# Measured on a simulated fallback roster {worker, polecat, krieger}:
+# project/worker, qcore/krieger AND qcore/dalinar were all protected. That is the
+# stranding defect this guard was narrowed to avoid, returning through a path
+# nobody was looking at.
+#
+# The population that hits it is precisely the one running older gc — the same
+# deployments most likely to install a core-pack fix without updating anything
+# else, so the rare-path assumption behind a low severity does not hold here.
+#
+# ACCEPTED LIMITATION, stated rather than hidden: in that mode the rig
+# information does not exist and cannot be reconstructed, so a foreign
+# "other-rig/worker" is indistinguishable from a local "local-rig/worker" and is
+# released. Strictly better than the alternatives — protecting it strands local
+# work on every old deployment, disabling the guard protects nothing — and
+# foreign crew names whose leaf is unknown locally (the shape both observed
+# incidents took) are still protected.
+
 agent_public_form_exists() {
     local candidate="$1"
     [ -n "$candidate" ] && printf '%s\n' "$AGENT_PUBLIC_FORMS" | grep -Fxq -- "$candidate"
@@ -367,6 +401,18 @@ is_locally_configured_identity() {
     local stripped
     stripped=$(strip_instance_suffix "$name")
     if [ "$stripped" != "$name" ] && agent_public_form_exists "$stripped"; then return 0; fi
+
+    # Degraded roster (see ROSTER_FROM_FALLBACK): the rig scope was LOST upstream,
+    # so match the leaf or every qualified local agent reads as foreign.
+    if [ "$ROSTER_FROM_FALLBACK" = "1" ]; then
+        local bare="${name##*/}"
+        if [ "$bare" != "$name" ]; then
+            if agent_public_form_exists "$bare"; then return 0; fi
+            local bare_stripped
+            bare_stripped=$(strip_instance_suffix "$bare")
+            if [ "$bare_stripped" != "$bare" ] && agent_public_form_exists "$bare_stripped"; then return 0; fi
+        fi
+    fi
 
     # Binding-qualified leaf: "<rig>/<binding>.<anything>" where <binding> is an
     # import this city uses. Covers namepool instances, which the roster cannot
