@@ -41,6 +41,11 @@ func TestDoltConfigWriteManagedCmd(t *testing.T) {
 		"enable: true",
 		"back_log: 50",
 		"max_connections_timeout_millis: 5000",
+		// ga-7unsv0: the managed server must turn transaction commits into Dolt
+		// version commits, or every bd write path that relies on the
+		// client-side auto-commit hook strands its rows in the working set and
+		// wedges the next merge.
+		`dolt_transaction_commit: "ON"`,
 		`dolt_auto_gc_enabled: "ON"`,
 		`dolt_stats_enabled: "OFF"`,
 		`dolt_stats_gc_enabled: "OFF"`,

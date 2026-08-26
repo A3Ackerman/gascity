@@ -3551,12 +3551,13 @@ func writeDoctorManagedDoltConfig(t *testing.T, cityPath string, overrides map[s
 			},
 		},
 		"system_variables": map[string]any{
-			"dolt_auto_gc_enabled":   "ON",
-			"dolt_stats_enabled":     "OFF",
-			"dolt_stats_gc_enabled":  "OFF",
-			"dolt_stats_memory_only": "ON",
-			"dolt_stats_paused":      "ON",
-			"wait_timeout":           "30",
+			"dolt_transaction_commit": "ON",
+			"dolt_auto_gc_enabled":    "ON",
+			"dolt_stats_enabled":      "OFF",
+			"dolt_stats_gc_enabled":   "OFF",
+			"dolt_stats_memory_only":  "ON",
+			"dolt_stats_paused":       "ON",
+			"wait_timeout":            "30",
 		},
 	}
 	for k, v := range overrides {

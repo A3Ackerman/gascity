@@ -2623,6 +2623,12 @@ func DoltConfigExpectedValuesForConfig(doltConfig config.DoltConfig) []DoltConfi
 	values := []DoltConfigExpectedValue{
 		{"behavior.auto_gc_behavior.enable", doltConfig.EffectiveAutoGCEnabled()},
 		{"behavior.auto_gc_behavior.archive_level", doltConfig.EffectiveArchiveLevel()},
+		// ga-7unsv0: without this the server never turns a transaction commit
+		// into a Dolt version commit, and every bd write path that relies on
+		// the client-side auto-commit hook strands its rows in the working
+		// set. Asserted here so a drifted config is a doctor finding rather
+		// than another silently wedged hub sync.
+		{"system_variables.dolt_transaction_commit", "ON"},
 		{"system_variables.dolt_auto_gc_enabled", doltConfig.AutoGCSysVar()},
 		{"system_variables.dolt_stats_enabled", "OFF"},
 		{"system_variables.dolt_stats_gc_enabled", "OFF"},
