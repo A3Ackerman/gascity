@@ -227,37 +227,6 @@ behavior:
 # Keep stats disabled for managed servers; use explicit gc dolt maintenance
 # commands for storage cleanup instead of background workers.
 system_variables:
-  # WITHOUT THIS, A LARGE CLASS OF WRITES NEVER BECOMES A COMMIT (ga-7unsv0).
-  # beads' post-run auto-commit hook returns immediately in SQL-server mode --
-  # "Skips SQL server modes; the server owns transaction commit lifecycle
-  # there" (cmd/bd/dolt_autocommit.go). That is only true if the server is
-  # configured to turn transaction commits into Dolt version commits. It is OFF
-  # by default, so neither side committed: 23 of 27 bd write-command files rely
-  # on that hook and left their rows in the working set FOREVER. Measured
-  # 2026-08-26: bd remember reports success, writes the row, creates no commit.
-  # Those rows then block every subsequent merge, which wedged qcore hub-sync
-  # three times in three days (4 rows on 08-25, 28 on 08-25 night, 88 labels
-  # plus 3 child_counters on 08-26).
-  #
-  # Proven in an isolated dolt 2.2.4 server before shipping:
-  #   * a plain INSERT with no explicit commit now produces a Dolt commit and
-  #     leaves the working set clean
-  #   * writes that ALREADY commit explicitly are unaffected -- the
-  #     BeginTx + DOLT_COMMIT(msg) + COMMIT shape that beads RunInTransaction
-  #     uses keeps its descriptive message, delta exactly one commit, no
-  #     doubling
-  #   * the qcore hub syncer merge batch still works, fast-forward included,
-  #     and adds no extra commit of its own
-  # The cost is that the previously-stranding paths commit as the generic
-  # "Transaction commit" rather than a descriptive message. That is strictly
-  # better than not committing at all; giving them real messages is the
-  # separate transact() conversion tracked on ga-7unsv0.
-  #
-  # ONE SHAPE TO AVOID in new code: writing with autocommit on and THEN calling
-  # DOLT_COMMIT(msg) now fails with "nothing to commit", because the write
-  # already committed. Audited 2026-08-26 -- every existing call site either
-  # writes inside an explicit transaction or already swallows that error.
-  dolt_transaction_commit: "ON"
   dolt_auto_gc_enabled: %q
   dolt_stats_enabled: "OFF"
   dolt_stats_gc_enabled: "OFF"
