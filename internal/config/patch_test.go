@@ -325,33 +325,29 @@ func TestApplyPatches_AgentNotFound(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{{Name: "mayor"}},
 	}
-	err := ApplyPatches(cfg, Patches{
+	if err := ApplyPatches(cfg, Patches{
 		Agents: []AgentPatch{
 			{Dir: "hw", Name: "polecat", Suspended: ptrBool(true)},
 		},
-	})
-	if err == nil {
-		t.Fatal("expected error for nonexistent agent")
+	}); err != nil {
+		t.Fatalf("ApplyPatches must not fail on an unappliable target: %v", err)
 	}
-	if !strings.Contains(err.Error(), "hw/polecat") {
-		t.Errorf("error = %q, want mention of hw/polecat", err)
-	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("error = %q, want mention of 'not found'", err)
+	requireUnappliedPatchWarning(t, cfg.LoadWarnings, "patches.agent[0]", "hw/polecat", "not found")
+	// The config must be exactly the config without that patch — a patch that
+	// matched nothing must not have half-applied.
+	if cfg.Agents[0].Suspended {
+		t.Fatal("a skipped patch modified an agent it did not match")
 	}
 }
 
 func TestApplyPatches_AgentNameRequired(t *testing.T) {
 	cfg := &City{}
-	err := ApplyPatches(cfg, Patches{
+	if err := ApplyPatches(cfg, Patches{
 		Agents: []AgentPatch{{Suspended: ptrBool(true)}},
-	})
-	if err == nil {
-		t.Fatal("expected error for missing name")
+	}); err != nil {
+		t.Fatalf("ApplyPatches must not fail on a malformed patch: %v", err)
 	}
-	if !strings.Contains(err.Error(), "name is required") {
-		t.Errorf("error = %q, want 'name is required'", err)
-	}
+	requireUnappliedPatchWarning(t, cfg.LoadWarnings, "patches.agent[0]", "name is required")
 }
 
 func TestApplyPatches_RigPath(t *testing.T) {
@@ -469,16 +465,16 @@ func TestApplyPatches_RigNotFound(t *testing.T) {
 	cfg := &City{
 		Rigs: []Rig{{Name: "hw", Path: "/path"}},
 	}
-	err := ApplyPatches(cfg, Patches{
+	if err := ApplyPatches(cfg, Patches{
 		Rigs: []RigPatch{
 			{Name: "missing", Path: ptrStr("/new")},
 		},
-	})
-	if err == nil {
-		t.Fatal("expected error")
+	}); err != nil {
+		t.Fatalf("ApplyPatches must not fail on an unappliable rig target: %v", err)
 	}
-	if !strings.Contains(err.Error(), "missing") {
-		t.Errorf("error = %q, want mention of 'missing'", err)
+	requireUnappliedPatchWarning(t, cfg.LoadWarnings, "patches.rigs[0]", "missing")
+	if cfg.Rigs[0].Path != "/path" {
+		t.Fatalf("a skipped rig patch modified the rig: path = %q", cfg.Rigs[0].Path)
 	}
 }
 
@@ -579,16 +575,16 @@ func TestApplyPatches_ProviderNotFound(t *testing.T) {
 	cfg := &City{
 		Providers: map[string]ProviderSpec{},
 	}
-	err := ApplyPatches(cfg, Patches{
+	if err := ApplyPatches(cfg, Patches{
 		Providers: []ProviderPatch{
 			{Name: "missing", Command: ptrStr("cmd")},
 		},
-	})
-	if err == nil {
-		t.Fatal("expected error")
+	}); err != nil {
+		t.Fatalf("ApplyPatches must not fail on an unappliable provider target: %v", err)
 	}
-	if !strings.Contains(err.Error(), "missing") {
-		t.Errorf("error = %q, want mention of 'missing'", err)
+	requireUnappliedPatchWarning(t, cfg.LoadWarnings, "patches.providers[0]", "missing")
+	if len(cfg.Providers) != 0 {
+		t.Fatalf("a skipped provider patch created a provider: %v", cfg.Providers)
 	}
 }
 
@@ -682,13 +678,15 @@ dir = "hw"
 name = "ghost"
 suspended = true
 `)
-	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
-	if err == nil {
-		t.Fatal("expected error for patch targeting nonexistent agent")
+	// THE LOAD MUST SUCCEED (ga-djvbvp): every gc command loads config, so a
+	// dangling patch used to stop the entire city. The typo is still caught —
+	// it is reported in provenance, printed by the CLI on every command, and
+	// fails `gc config --validate`.
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("load must not fail on a dangling patch target: %v", err)
 	}
-	if !strings.Contains(err.Error(), "hw/ghost") {
-		t.Errorf("error = %q, want mention of hw/ghost", err)
-	}
+	requireUnappliedPatchWarning(t, prov.Warnings, "hw/ghost", "not found")
 }
 
 func TestPatchesIsEmpty(t *testing.T) {
@@ -796,13 +794,14 @@ mode = "on_demand"
 template = "coder"
 mode = "always"
 `)
-	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
-	if err == nil {
-		t.Fatal("expected ambiguous named_session patch error")
+	// Ambiguity is skipped-and-reported for the same reason as a missing
+	// target: applying it would pick a target arbitrarily, and refusing to
+	// apply it must not cost the city every gc command.
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("load must not fail on an ambiguous patch target: %v", err)
 	}
-	if !strings.Contains(err.Error(), "ambiguous") || !strings.Contains(err.Error(), "coder") {
-		t.Fatalf("error = %q, want ambiguous coder target", err)
-	}
+	requireUnappliedPatchWarning(t, prov.Warnings, "ambiguous", "coder")
 }
 
 func TestApplyPatches_AgentSessionSetup(t *testing.T) {
@@ -1076,4 +1075,31 @@ func sliceEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// requireUnappliedPatchWarning asserts that an unappliable patch was reported
+// on cfg.LoadWarnings and that the report names every given substring
+// (ga-djvbvp). It replaces the old "ApplyPatches returns an error" assertions:
+// the GUARANTEE is unchanged — a patch that matched nothing must be reported,
+// naming the target and the reason — only the delivery moved from a fatal
+// error to a recorded warning that the CLI prints on every command and that
+// `gc config --validate` fails on.
+func requireUnappliedPatchWarning(t *testing.T, warnings []string, want ...string) {
+	t.Helper()
+	for _, w := range warnings {
+		if !IsUnappliedPatchWarning(w) {
+			continue
+		}
+		ok := true
+		for _, sub := range want {
+			if !strings.Contains(w, sub) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return
+		}
+	}
+	t.Fatalf("no unapplied-patch warning mentioning %v; warnings = %q", want, warnings)
 }
