@@ -721,6 +721,16 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 	}
 
+	// RE-DRAIN LoadWarnings AFTER PATCH APPLICATION (ga-djvbvp). The two copies
+	// near the start of composition run BEFORE the ApplyPatches calls above, so
+	// a warning recorded while applying a patch — which is where unapplied
+	// patches are now reported instead of aborting the load — would be written
+	// to root.LoadWarnings and never reach provenance. The CLI reads
+	// prov.Warnings, so without this the whole fix would be a silent no-op:
+	// recorded, unsurfaced, and indistinguishable from a clean config.
+	// appendUnique makes the earlier copies harmless to repeat.
+	prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
+
 	// Apply [agent_defaults] values to all agents (explicit and implicit)
 	// that don't set their own override. Deprecated [agents] aliases are
 	// normalized during parse/load before composition reaches this point.
