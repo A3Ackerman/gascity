@@ -4292,3 +4292,105 @@ prefix = "ct"
 		t.Fatalf("%s status = %q, want closed — stale-close must run alongside retention", openID, got.Status)
 	}
 }
+
+// TestOrderHistoryRendersOutcomeForAllTrackingStates pins the ga-kahru9 fix.
+//
+// `gc order history` used to print ORDER/BEAD/EXECUTED only, so a run that
+// FAILED and a run that SUCCEEDED rendered byte-identically. During the
+// ga-7unsv0 sync outage 18 of 21 consecutive runs carried the exec-failed label
+// and the operator could not see one of them; the outage read as healthy for
+// roughly five hours.
+//
+// The third state is the one that matters most: a run killed before the
+// dispatcher stamped any outcome closes with NO outcome label at all, and must
+// render "unknown" — never blank, and never success.
+func TestOrderHistoryRendersOutcomeForAllTrackingStates(t *testing.T) {
+	store := beads.NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+		if !strings.Contains(strings.Join(args, " "), "--label=order-run:sync") {
+			return []byte(`[]`), nil
+		}
+		return []byte(`[
+			{"id":"RUN-OK","title":"sync","status":"closed","issue_type":"task","created_at":"2026-02-27T13:00:00Z","labels":["order-run:sync","exec"]},
+			{"id":"RUN-FAIL","title":"sync","status":"closed","issue_type":"task","created_at":"2026-02-27T12:00:00Z","labels":["order-run:sync","exec-failed"]},
+			{"id":"RUN-KILLED","title":"sync","status":"closed","issue_type":"task","created_at":"2026-02-27T11:00:00Z","labels":["order-run:sync"]},
+			{"id":"RUN-LIVE","title":"sync","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z","labels":["order-run:sync"]}
+		]`), nil
+	})
+	aa := []orders.Order{{Name: "sync", Formula: "mol-sync"}}
+	resolver := func(orders.Order) ([]beads.OrdersStore, error) {
+		return []beads.OrdersStore{{Store: store}}, nil
+	}
+
+	want := map[string]string{
+		"RUN-OK":     "success",
+		"RUN-FAIL":   "failed",
+		"RUN-KILLED": "unknown",
+		"RUN-LIVE":   "running",
+	}
+
+	// --- human table ---
+	var stdout, stderr bytes.Buffer
+	if code := doOrderHistoryWithStoresResolverJSON("sync", "", aa, resolver, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doOrderHistory = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "OUTCOME") {
+		t.Fatalf("table has no OUTCOME column:\n%s", out)
+	}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		id := fields[1]
+		if _, tracked := want[id]; !tracked {
+			continue
+		}
+		seen[id] = true
+		if got := fields[len(fields)-1]; got != want[id] {
+			t.Errorf("%s outcome = %q, want %q\nline: %s", id, got, want[id], line)
+		}
+	}
+	// Non-vacuity: every state must actually have been exercised, or a
+	// silently-missing row would let this test pass while proving nothing.
+	for id := range want {
+		if !seen[id] {
+			t.Errorf("row %s never appeared in the table — assertion was vacuous:\n%s", id, out)
+		}
+	}
+
+	// --- json ---
+	stdout.Reset()
+	stderr.Reset()
+	if code := doOrderHistoryWithStoresResolverJSON("sync", "", aa, resolver, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doOrderHistory --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var payload orderHistoryJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if len(payload.Entries) != len(want) {
+		t.Fatalf("json entries = %d, want %d: %+v", len(payload.Entries), len(want), payload.Entries)
+	}
+	for _, e := range payload.Entries {
+		if e.Outcome != want[e.BeadID] {
+			t.Errorf("json %s outcome = %q, want %q", e.BeadID, e.Outcome, want[e.BeadID])
+		}
+	}
+}
+
+// TestOrderRunOutcomeDisplayNeverBlankForClosedRun guards the specific
+// regression: a closed run with no outcome label must not come back "" (which
+// rendered as an empty column and read as "nothing wrong").
+func TestOrderRunOutcomeDisplayNeverBlankForClosedRun(t *testing.T) {
+	if got := orderRunOutcomeDisplay(orders.OrderRun{Open: false}); got != "unknown" {
+		t.Errorf("closed run with no outcome = %q, want %q", got, "unknown")
+	}
+	if got := orderRunOutcomeDisplay(orders.OrderRun{Open: true}); got != "running" {
+		t.Errorf("open run with no outcome = %q, want %q", got, "running")
+	}
+	if got := orderRunOutcomeDisplay(orders.OrderRun{Outcome: orders.RunOutcomeExecFailed}); got != "failed" {
+		t.Errorf("exec-failed run = %q, want %q", got, "failed")
+	}
+}
