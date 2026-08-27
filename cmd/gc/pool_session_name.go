@@ -151,6 +151,8 @@ func releaseOrphanedPoolAssignments(
 	var released []releasedPoolAssignment
 	var protectedForeign protectedForeignAssignees
 	defer protectedForeign.log()
+	var heldByGate heldByOrphanReleaseGate
+	defer heldByGate.log()
 	cityName := cfg.EffectiveCityName()
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
@@ -166,6 +168,31 @@ func releaseOrphanedPoolAssignments(
 		}
 		agentCfg := findAgentByTemplate(cfg, template)
 		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		// OPERATOR STOP LEVER (ga-h5435p), deliberately ahead of every liveness
+		// check and of the detached probe, which spawns a subprocess: when the
+		// switch is thrown for this rig the sweeper must do NOTHING for its
+		// work, not merely decline the final write.
+		//
+		// Placed AFTER the candidacy filters above so the held count means
+		// "claims this lever actually held" rather than "beads the loop walked
+		// past" — the summary line is read as cutover evidence that the lever
+		// took effect, so it has to be the honest number.
+		gateRig := ""
+		gateAllowed := true
+		if storeRefAware {
+			gateRig = strings.TrimSpace(assignedWorkStoreRefs[i])
+			gateAllowed = poolOrphanReleaseAllowed(cfg, gateRig)
+		} else {
+			// No usable store refs this tick; resolve the owning rig from the
+			// bead itself and fail closed if it cannot be resolved while any
+			// rig has the switch thrown.
+			gateRig = poolOrphanReleaseRigForBead(cfg, wb)
+			gateAllowed = poolOrphanReleaseAllowedForBead(cfg, wb)
+		}
+		if !gateAllowed {
+			heldByGate.add(gateRig, wb.ID)
 			continue
 		}
 		if assignee == "" {
