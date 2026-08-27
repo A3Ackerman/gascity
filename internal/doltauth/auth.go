@@ -159,7 +159,24 @@ func resolvePassword(scopeRoot, host string, port int, overridePath string) stri
 }
 
 func resolvePasswordWithEnv(envPass, scopeRoot, host string, port int, overridePath string, allowAmbientBeadsPassword bool) string {
-	if pass := strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD")); pass != "" {
+	// The ambient PASSWORD is half of the ambient identity and is declined on
+	// the same provable endpoint mismatch as the ambient user
+	// (ambientIdentityAppliesTo). Guarding the user alone is not enough, and the
+	// way it fails is actively misleading: a password present at all forces the
+	// credentialed path, so with the user correctly declined the connection
+	// falls back to the local default and the error moves from
+	//
+	//	Access denied for user 'cherub'   ->   Access denied for user 'root'
+	//
+	// which reads as an unrelated bug rather than as the same leak one variable
+	// further along. Measured by lana on 2026-08-27 against the first fix
+	// (5b70f17f4): with a real crew env, `env -u GC_DOLT_PASSWORD` alone
+	// restored hq while `env -u GC_DOLT_USER` alone did not.
+	//
+	// root on the managed local server has NO password, so supplying one is not
+	// merely redundant — it is what makes the connection fail.
+	ambientApplies := ambientIdentityAppliesTo(host, port)
+	if pass := strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD")); pass != "" && ambientApplies {
 		return pass
 	}
 	if pass := ReadStoreLocalPassword(scopeRoot); pass != "" {
@@ -169,7 +186,7 @@ func resolvePasswordWithEnv(envPass, scopeRoot, host string, port int, overrideP
 		return envPass
 	}
 	if allowAmbientBeadsPassword {
-		if pass := strings.TrimSpace(os.Getenv("BEADS_DOLT_PASSWORD")); pass != "" {
+		if pass := strings.TrimSpace(os.Getenv("BEADS_DOLT_PASSWORD")); pass != "" && ambientApplies {
 			return pass
 		}
 	}
