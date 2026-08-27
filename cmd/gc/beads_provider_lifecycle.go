@@ -1028,6 +1028,33 @@ func verifyCanonicalBdScopeStoreReady(store beads.Store, sleep func(time.Duratio
 	return lastErr
 }
 
+// forcedScopeDoltConfigStateForInit derives a scope's canonical config from
+// city.toml WITHOUT consulting the scope file, so a post-init scope whose
+// .beads/config.yaml bd rewrote (or that carries nothing at all) is still put
+// back into canonical shape. That is what "forced" means, and for prefix,
+// types, mode and metadata it is correct.
+//
+// It must not force an ENDPOINT it has no source for. city.toml is the only
+// input here, so when it declares no endpoint for a scope the result is an
+// INFERENCE ("this scope must inherit the city"), not a declaration — while the
+// scope file may hold an endpoint an operator set deliberately.
+//
+// ga-uurd84 / ga-tmhxnd, 2026-08-27 22:50:16Z: rig qcore's file stated
+// gc.endpoint_origin: explicit with the westeros hub (100.71.23.94:3307) after
+// the hub flip; city.toml carried no endpoint keys for the rig. A controller
+// reload reached finalizeCanonicalBdScopeInit, this function inferred
+// inherited_city, and the write stripped dolt.host/dolt.port/dolt.user and
+// stamped the result verified. Every resolution without an ambient
+// GC_DOLT_HOST/PORT then read the frozen local archive with no error at all —
+// silent stale reads, not visible breakage.
+//
+// The reason it had never fired: the bd lifecycle script was failing upstream
+// (hub host dialled on the managed-local port), so initBeadsForDirWithExecutor
+// returned the error and never reached finalize. Fixing the script (ed608d79d)
+// removed an accidental guard.
+//
+// So: an on-disk origin that DECLARES an endpoint outranks an inferred one.
+//
 //nolint:unparam // error slot preserves the resolver-shaped contract
 func forcedScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.ConfigState, bool, error) {
 	if strings.TrimSpace(dir) == "" || strings.TrimSpace(prefix) == "" {
@@ -1040,16 +1067,18 @@ func forcedScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.C
 		cityState := desiredCityDoltConfigState(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg))
 		if samePath(cityPath, dir) {
 			cityState.IssuePrefix = prefix
-			return cityState, true, nil
+			return preservedDeclaredScopeEndpoint(cityPath, dir, prefix, cityState), true, nil
 		}
 		for i := range cfg.Rigs {
 			if samePath(cfg.Rigs[i].Path, dir) {
 				rig := cfg.Rigs[i]
 				rig.Prefix = prefix
-				return desiredRigDoltConfigState(cityPath, rig, cityState), true, nil
+				forced := desiredRigDoltConfigState(cityPath, rig, cityState)
+				return preservedDeclaredScopeEndpoint(cityPath, dir, prefix, forced), true, nil
 			}
 		}
-		return desiredRigDoltConfigState(cityPath, config.Rig{Name: filepath.Base(dir), Path: dir, Prefix: prefix}, cityState), true, nil
+		forced := desiredRigDoltConfigState(cityPath, config.Rig{Name: filepath.Base(dir), Path: dir, Prefix: prefix}, cityState)
+		return preservedDeclaredScopeEndpoint(cityPath, dir, prefix, forced), true, nil
 	}
 	if loaded, ok := cityDoltConfigs.Load(cityPath); ok {
 		if cfg, ok := loaded.(config.DoltConfig); ok {
@@ -1058,9 +1087,47 @@ func forcedScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.C
 	}
 	cityState := desiredCityDoltConfigState(cityPath, cityDolt, prefix)
 	if samePath(cityPath, dir) {
-		return cityState, true, nil
+		return preservedDeclaredScopeEndpoint(cityPath, dir, prefix, cityState), true, nil
 	}
-	return desiredRigDoltConfigState(cityPath, config.Rig{Name: filepath.Base(dir), Path: dir, Prefix: prefix}, cityState), true, nil
+	forced := desiredRigDoltConfigState(cityPath, config.Rig{Name: filepath.Base(dir), Path: dir, Prefix: prefix}, cityState)
+	return preservedDeclaredScopeEndpoint(cityPath, dir, prefix, forced), true, nil
+}
+
+// preservedDeclaredScopeEndpoint keeps a scope's own DECLARED endpoint when the
+// forced state would replace it with an inferred one.
+//
+// "Declared" means the scope file resolves to an authoritative origin that
+// carries an endpoint — explicit for a rig, city_canonical for a city. Those
+// only get written by an operator action (gc rig endpoint set, gc beads city
+// endpoint set) or a deliberate edit. "Inferred" means the origin was computed
+// from the absence of endpoint keys in city.toml — inherited_city or
+// managed_city. Replacing the first with the second is never an upgrade: it
+// discards the only record of where the store actually is, and it does so
+// silently, because a managed-local endpoint usually resolves and answers.
+//
+// The reverse direction is untouched: a forced state that DECLARES an endpoint
+// (city.toml carries the keys) still wins, so an operator's city.toml remains
+// the way to move a scope's endpoint. Anything the forced state owns that is
+// not the endpoint — prefix above all — is carried onto the preserved state, so
+// this narrows only the endpoint decision.
+func preservedDeclaredScopeEndpoint(cityPath, dir, prefix string, forced contract.ConfigState) contract.ConfigState {
+	if contract.EndpointOriginDeclaresEndpoint(forced.EndpointOrigin) {
+		return forced
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, dir, prefix)
+	if err != nil || resolved.Kind != contract.ScopeConfigAuthoritative {
+		return forced
+	}
+	if !contract.EndpointOriginDeclaresEndpoint(resolved.State.EndpointOrigin) {
+		return forced
+	}
+	preserved := resolved.State
+	preserved.IssuePrefix = forced.IssuePrefix
+	if strings.TrimSpace(preserved.DoltMode) == "" {
+		preserved.DoltMode = forced.DoltMode
+	}
+	preserved.CustomTypes = contract.MergeCustomTypes(preserved.CustomTypes, forced.CustomTypes)
+	return preserved
 }
 
 func initFileStoreForDir(cityPath, dir string) error {
