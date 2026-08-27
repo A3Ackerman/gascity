@@ -77,9 +77,10 @@ exhaustion; bead az-405 has the full evidence trail). The adapter was rewritten 
 - herdr **restores the saved layout** (`~/.config/herdr/sessions/<name>/session.json`)
   on server start — after a storm or provider era, archive/delete it or you boot into
   dozens of stale panes (the reaper cleans bound ones; foreign ones need `pane close`).
-- The herdr server dies with the supervisor's process group on
-  `launchctl kickstart -k` — expect a server restart + layout restore + re-adoption
-  wave after supervisor restarts.
+- The herdr server dies with the supervisor's process group on any supervisor
+  refresh (`gc supervisor install`; historically a bare `launchctl kickstart -k`,
+  which must no longer be used — see ga-4v3ckk) — expect a server restart +
+  layout restore + re-adoption wave after supervisor restarts.
 - `gc rig suspend` holds pack agents but NOT city.toml `[[named_session]]`s pointing at
   the rig; those respawn (mode=always) until their mode changes or the rig's sessions
   are closed.

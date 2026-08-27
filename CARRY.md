@@ -233,16 +233,39 @@ set -e
 cp /tmp/gc-new ~/go/bin/gc.staged
 cp ~/go/bin/gc ~/go/bin/gc.bak-$(date +%Y%m%d-%H%M)
 mv ~/go/bin/gc.staged ~/go/bin/gc        # single atomic replacement; ~/.local/bin/gc symlinks here
-gc version > /tmp/gcver 2>&1; echo "exit=$? out=$(cat /tmp/gcver)"   # VERIFY before kickstart
-launchctl kickstart -k gui/$(id -u)/com.gascity.supervisor
+gc version > /tmp/gcver 2>&1; echo "exit=$? out=$(cat /tmp/gcver)"   # VERIFY before refreshing
+gc supervisor install                    # re-registers the launchd job; NOT kickstart
+launchctl list | grep gascity            # middle column is LAST EXIT: -9 means SIGKILL
 ```
 
-Verify **before** the kickstart, and never through a pipe: `gc version | head;
+**Refresh the supervisor with `gc supervisor install`, never with a bare
+`launchctl kickstart -k` (ga-4v3ckk).** A plain kickstart reuses the existing
+job registration, and launchd caches that job's launch constraints against the
+binary present when it was registered. After an atomic swap the inode is new,
+the cached constraint no longer matches, and macOS SIGKILLs the process on
+launch as a `CODESIGNING / Launch Constraint Violation`. That is the ga-l8pur
+failure mode — a ~4-hour city-wide outage on 2026-08-03, fired again
+2026-08-17. The binary being adhoc/linker-signed is normal and is NOT the
+cause; do not "fix" it by re-signing.
+
+`gc supervisor install` re-registers instead of reusing: plist preflight, write,
+`launchctl bootout` / `bootstrap` / `enable` / `kickstart -p`, then it polls to
+confirm the new build ID is actually serving and rolls back if it is not. The
+same sequence is `restartSupervisor` in cmd/gc/drift.go, whose comment says it
+outright — "a plain kickstart retains launchd's cached launch constraints
+across binary swaps".
+
+Read the last-exit column before and after: `launchctl list | grep gascity`
+prints `<pid> <last-exit> com.gascity.supervisor`, and a `-9` means the job's
+most recent launch was SIGKILLed. The hazard stays armed even when a later
+retry happens to survive, which is how it went unnoticed for weeks.
+
+Verify **before** the refresh, and never through a pipe: `gc version | head;
 echo $?` reports head's status and prints `0` for a binary SIGKILLed before it
-wrote a byte. A bad swap reads `exit=137` with empty output — kickstarting onto
+wrote a byte. A bad swap reads `exit=137` with empty output — refreshing onto
 one takes the city down.
 
-Kickstart re-adopts (does not respawn) running tmux sessions — long-lived
+The refresh re-adopts (does not respawn) running tmux sessions — long-lived
 sessions keep the old binary until individually cycled; fresh subprocess
 paths (`gc bd`, `gc hook --claim`) pick the new binary up immediately.
 For a change that must reach long-lived sessions (tmux/runtime behavior),
