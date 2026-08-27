@@ -3311,7 +3311,38 @@ else
 fi
 
 # Resolve DOLT_PORT now that STATE_FILE is set.
-DOLT_PORT=$(allocate_port)
+#
+# A REMOTE STORE MUST NOT BE GIVEN THE MANAGED-LOCAL PORT (ga-tmhxnd).
+# allocate_port() is the MANAGED server's allocator: it asks
+# `gc dolt-state allocate-port` first and returns that immediately, so
+# GC_DOLT_PORT is never consulted when the helper answers. That is right for a
+# managed store — validated provider state should beat a stale inherited port —
+# and wrong for a rig whose store lives on another box.
+#
+# What it cost, 2026-08-27: after the qcore flip, connect_host() correctly
+# returned the hub (100.71.23.94) while DOLT_PORT came back 51361, the LOCAL
+# managed port. init therefore dialled 100.71.23.94:51361 — nothing listens
+# there — and reported "managed Dolt server unreachable". Measured: hub:51361
+# CLOSED, hub:3307 OPEN, 127.0.0.1:51361 OPEN. The endpoint was assembled from
+# two different scopes, host from the rig config and port from the local
+# allocator.
+#
+# The damage was not a failed init. `gc supervisor` runs this on every config
+# reload, so the controller REJECTED all four reloads that day and kept running
+# stale config while city.toml said otherwise — operators believed changes had
+# applied. It also put a restart at risk, because the same call runs at city
+# start.
+#
+# Fails CLOSED when a remote store has no port: dialling a guessed port against
+# someone else's host is how this bug looked in the first place.
+if is_remote; then
+    if [ -z "${GC_DOLT_PORT:-}" ]; then
+        die "remote Dolt host '$GC_DOLT_HOST' given with no GC_DOLT_PORT; refusing to fall back to the managed-local port (ga-tmhxnd)"
+    fi
+    DOLT_PORT="$GC_DOLT_PORT"
+else
+    DOLT_PORT=$(allocate_port)
+fi
 
 case "$op" in
     start)        op_start ;;
