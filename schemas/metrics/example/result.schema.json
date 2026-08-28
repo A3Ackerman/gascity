@@ -209,7 +209,8 @@
               "pack-registry-requests",
               "session-resume",
               "worktree-gc",
-              "session-history"
+              "session-history",
+              "agent-is-foreign"
             ]
           },
           "event_id": {

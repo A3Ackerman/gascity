@@ -348,15 +348,39 @@ func TestInjectedImmutableCommandCatalogRoundTripsWithoutExpandingProduction(t *
 		t.Fatal("production encoder accepted a non-sentinel ID from an injected-only catalog")
 	}
 
-	generatedCount := 0
-	generatedCommandIDCatalog(func(commandIDEntry) { generatedCount++ })
-	if generatedCount != 192 {
-		t.Fatalf("generated production catalog has %d entries, want 192", generatedCount)
+	// The property is that injecting an entry does not expand PRODUCTION, so
+	// the generated catalog's size is measured before and after rather than
+	// compared against a literal. A literal here measured the toolchain, not
+	// the property: it drifted three commands out of date silently, so every
+	// later change arrived with this suite already red and its own count
+	// wrongly implicated.
+	countGenerated := func() int {
+		n := 0
+		generatedCommandIDCatalog(func(commandIDEntry) { n++ })
+		return n
+	}
+	generatedCount := countGenerated()
+	if generatedCount == 0 {
+		t.Fatal("generated production catalog is empty; the count comparison below would be vacuous")
 	}
 
 	injected := func(yield func(commandIDEntry)) {
 		productionCommandIDCatalog(yield)
 		yield(commandIDEntry{id: injectedID, wire: "injected-only"})
+	}
+
+	// production is the generated catalog PLUS the census's synthetic entries,
+	// so the injected catalog is sized against production, not against
+	// generated.
+	productionCount := 0
+	productionCommandIDCatalog(func(commandIDEntry) { productionCount++ })
+	injectedCount := 0
+	injected(func(commandIDEntry) { injectedCount++ })
+	if injectedCount != productionCount+1 {
+		t.Fatalf("injected catalog yields %d entries, want %d (production %d + the injected one) — the injection did not take effect", injectedCount, productionCount+1, productionCount)
+	}
+	if after := countGenerated(); after != generatedCount {
+		t.Fatalf("generated production catalog grew from %d to %d entries; injection must not expand production", generatedCount, after)
 	}
 	encoded, err := encodeEventWithCommandIDCatalog(event, injected)
 	if err != nil {
