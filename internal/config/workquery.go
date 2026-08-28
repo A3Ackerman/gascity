@@ -290,7 +290,34 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, includeEphemeralRea
 
 func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bool) string {
 	if includeEphemeralReady {
-		return ""
+		// This probe used to be omitted entirely here, on the premise that the
+		// `bd ready --include-ephemeral` call in the tier above reads the wisps
+		// tier. It does not. Measured against a live store 2026-08-28:
+		// `bd ready --include-ephemeral --assignee=gastown.deacon` returned []
+		// for an open assigned wisp that
+		// `bd query "ephemeral=true AND status=open AND assignee=..."`
+		// returned immediately. The in-progress twin above kept its real probe,
+		// which is why an assigned IN_PROGRESS wisp was always found while its
+		// OPEN sibling was invisible -- and why hand-mutating a stranded
+		// successor to in_progress "fixed" it. That asymmetry was the whole
+		// defect (ga-dpz553, and ga-lnlwrq / ga-0hxp79 / ga-w7qlju before it).
+		//
+		// Mirroring the in-progress probe: bd 1.0.5+ filters ephemeral, status
+		// and assignee server-side, so the row set for one agent is small and
+		// the probe stays bounded rather than scanning every ephemeral issue.
+		//
+		// Readiness still has to be computed here. `bd query status=open` is
+		// NOT a readiness query -- bd's own help notes that dependency-blocked
+		// issues keep status "open" -- so the epic and blocking-dependency
+		// rules run through the same jq filter the 1.0.4 path uses. Without
+		// them this would trade a blind tier for one that serves unworkable
+		// rows, which is not an improvement. The window is bounded at 20 and
+		// jq re-sorts inside it, so the oldest ready wisp wins regardless of
+		// the order bd returns.
+		filter := legacyEphemeralReadyFilterJQ(`.`, 1)
+		return `r=$(bd query --json "ephemeral=true AND status=open AND assignee=\"$` + shellVar + `\"" --sort created --limit=20 2>/dev/null | ` +
+			`jq ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
+			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 	}
 	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1)
 	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
