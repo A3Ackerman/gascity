@@ -1054,7 +1054,7 @@ func verifyCanonicalBdScopeStoreReady(store beads.Store, sleep func(time.Duratio
 // silent stale reads, not visible breakage.
 //
 // The reason it had never fired: the bd lifecycle script was failing upstream
-// (hub host dialled on the managed-local port), so initBeadsForDirWithExecutor
+// (hub host dialed on the managed-local port), so initBeadsForDirWithExecutor
 // returned the error and never reached finalize. Fixing the script (ed608d79d)
 // removed an accidental guard.
 //
@@ -1954,7 +1954,7 @@ func wrapInvalidEndpointStateError(scope string, err error) error {
 //
 // Everything else comes back from compatDoltDriftAdvisories instead. See
 // ga-298g8t: a rig file carrying the DERIVED inherited_city while city.toml
-// declares an endpoint used to be a hard error, which made the two defences
+// declares an endpoint used to be a hard error, which made the two defenses
 // protecting rig qcore's hub endpoint on 2026-08-27 mutually exclusive — the
 // operator's city.toml declaration, and the rig file being explicit. They only
 // avoided colliding because of the order the repair happened in; keys before
@@ -2235,8 +2235,29 @@ func applyLegacyRigScopeInitDoltEnv(env map[string]string, cityPath, scopeRoot s
 	}
 	clearProjectedPostgresEnv(env)
 	target := applyLegacyRigExternalTarget(env, *explicitRig)
-	clearProjectedDoltPasswordEnv(env)
-	applyResolvedDoltAuthEnv(env, scopeRoot, "")
+	// qc-ow3u50: the rig-init server_reachable probe was dialing a PARTIAL
+	// (user, password) because this path cleared the projected password and then
+	// resolved auth with an EMPTY fallback user against the raw scope root.
+	// ResolveScopedFromEnv disallows ambient BEADS_DOLT_PASSWORD and
+	// resolveUser("") returns "", so the child env ended up with GC_DOLT_USER and
+	// GC_DOLT_PASSWORD both empty — and every auth mismatch surfaced as "managed
+	// Dolt server unreachable", wedging rig init (and with it the review plane).
+	// Project credentials the way the SESSION path does (applyCanonicalDoltAuthEnv,
+	// applyCanonicalDoltAuthEnv): resolve auth against the
+	// credential-owning scope root (doltauth.AuthScopeRoot — the rig for an
+	// explicit endpoint, the city otherwise) with the target's user as the
+	// fallback, so the init subprocess receives the same complete (user, password)
+	// the session projection already produces. Declared endpoint credentials must
+	// reach the init child env, not be cleared and half-resolved.
+	//
+	// The fallback user comes from the canonical resolver (the scope's own
+	// .beads/config.yaml dolt.user), which woodhouse's de62dbae1 now preserves
+	// rather than overwriting with an inferred value. If resolution fails, the
+	// empty fallback keeps the prior behavior rather than inventing a user.
+	if resolved, rerr := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot); rerr == nil {
+		target.User = strings.TrimSpace(resolved.User)
+	}
+	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
 	mirrorBeadsDoltScopeEnv(env, target)
 }
 

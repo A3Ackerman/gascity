@@ -12123,3 +12123,71 @@ func TestDefaultScopeDoltDatabase(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyLegacyRigScopeInitDoltEnvProjectsEndpointCredentials is the
+// qc-ow3u50 regression: the rig-init (independent-scope) env path used by the
+// supervisor's beads init must project the rig's external endpoint CREDENTIALS
+// (GC_DOLT_USER + GC_DOLT_PASSWORD), not just host/port. Before the fix this
+// path cleared the password and resolved auth with an empty fallback user, so
+// the init subprocess dialed with a partial (user, password) and the
+// server_reachable probe failed as "managed Dolt server unreachable", wedging
+// rig init and the review plane. The fix routes auth through the canonical
+// session-path projection (applyCanonicalDoltAuthEnv), resolving against the
+// credential-owning scope root with the target's user.
+func TestApplyLegacyRigScopeInitDoltEnvProjectsEndpointCredentials(t *testing.T) {
+	// Isolate from any ambient host env so only the projected values surface.
+	for _, k := range []string{"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_PASSWORD"} {
+		t.Setenv(k, "")
+	}
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "qcore")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// City config declares the rig's external endpoint (dolt_host/dolt_port).
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "qcore"
+path = "qcore"
+prefix = "qc"
+dolt_host = "rig-db.example.com"
+dolt_port = "4406"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The rig's own .beads/config.yaml DECLARES the endpoint + user (explicit).
+	rigCfg := "issue_prefix: qc\ngc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.host: rig-db.example.com\ndolt.port: \"4406\"\ndolt.user: qcworker\ndolt.auto-start: false\n"
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(rigCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The credential for the endpoint lives in a credentials file keyed by
+	// host:port; point the resolver at it.
+	credFile := filepath.Join(cityPath, "creds")
+	credData := "[rig-db.example.com:4406]\npassword = s3cret-rig-pw\n"
+	if err := os.WriteFile(credFile, []byte(credData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", credFile)
+
+	env := map[string]string{}
+	applyLegacyRigScopeInitDoltEnv(env, cityPath, rigPath)
+
+	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.com" {
+		t.Errorf("GC_DOLT_HOST = %q, want rig-db.example.com", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "4406" {
+		t.Errorf("GC_DOLT_PORT = %q, want 4406", got)
+	}
+	// The credentials must reach the init child env. Before the fix both were
+	// empty (password cleared, empty fallback user).
+	if got := env["GC_DOLT_USER"]; got != "qcworker" {
+		t.Errorf("GC_DOLT_USER = %q, want qcworker (projected from the scope's declared endpoint)", got)
+	}
+	if got := env["GC_DOLT_PASSWORD"]; got != "s3cret-rig-pw" {
+		t.Errorf("GC_DOLT_PASSWORD = %q, want the resolved credential for the endpoint (init must not dial with an empty password)", got)
+	}
+}

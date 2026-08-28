@@ -102,6 +102,7 @@ gc agent
 | Subcommand | Description |
 |------------|-------------|
 | [gc agent add](#gc-agent-add) | Add an agent scaffold |
+| [gc agent is-foreign](#gc-agent-is-foreign) | Report whether an assignee identity belongs to another city's roster |
 | [gc agent list](#gc-agent-list) | List configured agents |
 | [gc agent resume](#gc-agent-resume) | Resume a suspended agent |
 | [gc agent suspend](#gc-agent-suspend) | Suspend an agent (reconciler will skip it) |
@@ -138,6 +139,34 @@ gc agent add --name worker --prompt-template ./worker.md --suspended
 | `--name` | string |  | Name of the agent |
 | `--prompt-template` | string |  | Path to prompt template file (relative to city root) |
 | `--suspended` | bool |  | Register the agent in suspended state |
+
+## gc agent is-foreign
+
+Report whether an assignee identity belongs to another city's roster.
+
+Answers the question the pool sweeper's foreign-identity gate answers, using the
+same code: is this &lt;rig&gt;/&lt;name&gt; identity one THIS city configures, or one it
+merely SEES in a shared rig store?
+
+Exit codes:
+  0  local    this city can answer this identity's liveness
+  1  foreign  well-formed identity absent from this city's roster — protect it
+  2  unknown  this city cannot answer (no config, bad usage) — protect it
+
+"local" is not a claim that the identity is ALIVE. Liveness is a separate
+question and conflating the two is what stripped 18 of another city's workflow
+steps on 2026-08-26 (ga-7dr90m).
+
+Callers that reap on this verdict MUST fail closed: treat a missing verb, exit 2,
+or unparseable output as "protect", never as "local".
+
+```
+gc agent is-foreign <identity> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output in JSON format |
 
 ## gc agent list
 
@@ -1937,8 +1966,12 @@ gc import add https://github.com/org/repo/tree/main/packs/review --version '^1.2
 Validate installed pack import state
 
 ```
-gc import check
+gc import check [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--verify-source` | bool |  | also contact each declared source and verify it can produce the pinned commit (network, seconds per source) |
 
 ## gc import credential
 
