@@ -292,7 +292,17 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 		if commitOf(bdVersion) != "" && commitOf(bdVersion) == commitOf(libraryVersion) {
 			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and linked beads library built from the same commit ("+commitOf(bdVersion)+"); schema compatible despite differing version labels", details)
 		}
-		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd version differs from linked beads library version", details)
+		// A version-label mismatch must not take the native store offline. The
+		// label is a build artifact, not a compatibility signal: bd's version
+		// string is hardcoded (cmd/bd/version.go), so module-install and source
+		// builds of the SAME commit report different labels, and the commit never
+		// reaches this compare on the probe path (bd context --json emits the
+		// hardcoded label). Every observed real version-skew incident was
+		// schema-shaped, not label-shaped (qc-04ff7.18). The schema version is
+		// validated above and is the hard gate; a label we cannot trust only
+		// warns. (syl ruling, 2026-08-25; the bd-reports-real-commit hard compare
+		// is the upstream follow-up, routed to the beads maintainer.)
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "bd version label differs from linked beads library version; schema version is the compatibility gate", details)
 	}
 	return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and linked beads library versions match", details)
 }

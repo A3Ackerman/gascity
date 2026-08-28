@@ -484,7 +484,11 @@ func TestCheckVersionCompatSourceBuild(t *testing.T) {
 		want       PreflightCheckState
 	}{
 		{"source build reports (devel) — schema is the signal, pass", "(devel)", validCtx("1.0.5"), PreflightCheckPass},
-		{"confirmed version mismatch still fails", "1.0.5", validCtx("1.0.4"), PreflightCheckFail},
+		// Syl ruling (2026-08-25): a version-LABEL mismatch never hard-fails the
+		// native store — the label is an unreliable build artifact (bd's version
+		// string is hardcoded), and every observed real skew was schema-shaped.
+		// The schema check above is the hard gate; a label mismatch only warns.
+		{"label mismatch warns, does not fail (schema is the gate)", "1.0.5", validCtx("1.0.4"), PreflightCheckWarn},
 		{"matching versions pass", "1.0.5", validCtx("1.0.5"), PreflightCheckPass},
 		{"missing bd version is unconfirmable — warn", "1.0.5", validCtx(""), PreflightCheckWarn},
 		// Same-commit-different-label cases (the westeros defect): a
@@ -500,9 +504,11 @@ func TestCheckVersionCompatSourceBuild(t *testing.T) {
 		// behind a "dev: " prefix — this is the label form the original
 		// delimiter-keyed commitOf missed (syl, qc-04ff7.18).
 		{"same commit, pseudo-version lib vs (dev: hex) bd — pass (westeros)", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 (dev: 67652d8b5caf)"), PreflightCheckPass},
-		{"bd reports (dev) with no commit — fails, no parse guess", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 (dev)"), PreflightCheckFail},
-		{"different commit embedded — still fails", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 (deadbeebabe)"), PreflightCheckFail},
-		{"label mismatch, no commit on bd side — fails (no parse guess)", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.0.4"), PreflightCheckFail},
+		// A mismatch with no recoverable shared commit warns (never hard-fails);
+		// the schema version is the real gate.
+		{"bd reports (dev) with no commit — warns, schema is the gate", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 (dev)"), PreflightCheckWarn},
+		{"different commit embedded — warns, schema is the gate", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.1.0 (deadbeebabe)"), PreflightCheckWarn},
+		{"label mismatch, no commit on bd side — warns, schema is the gate", "1.1.1-0.20260716185344-67652d8b5caf", validCtx("1.0.4"), PreflightCheckWarn},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
