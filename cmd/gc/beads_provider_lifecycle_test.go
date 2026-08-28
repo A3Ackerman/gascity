@@ -10350,7 +10350,7 @@ op_ensure_ready
 	}
 }
 
-func TestValidateCanonicalCompatDoltDriftRejectsInheritedRigCompatOverrideWithRelativePath(t *testing.T) {
+func TestValidateCanonicalCompatDoltDriftAdvisesInheritedRigCompatOverrideWithRelativePath(t *testing.T) {
 	cityPath := t.TempDir()
 	rigRel := "frontend"
 	rigPath := filepath.Join(cityPath, rigRel)
@@ -10399,13 +10399,22 @@ dolt.auto-start: false
 		}
 	}()
 
-	err = validateCanonicalCompatDoltDrift(cityPath, cfg)
-	if err == nil || !strings.Contains(err.Error(), `rig "frontend"`) {
-		t.Fatalf("validateCanonicalCompatDoltDrift() error = %v, want inherited rig compat error", err)
+	// ga-298g8t: this is an ADVISORY, not a refusal. validateCanonicalCompatDoltDrift
+	// is the first statement of startBeadsLifecycle, which runs on gc start and
+	// on every controller config reload, so refusing here rejects reloads and can
+	// stop the city coming back. inherited_city in a rig file is what the ABSENCE
+	// of city.toml endpoint keys computes to — a derived value — and it must not
+	// veto the operator's declaration. The drift is still reported.
+	if err = validateCanonicalCompatDoltDrift(cityPath, cfg); err != nil {
+		t.Fatalf("validateCanonicalCompatDoltDrift() error = %v, want no refusal for a derived inherited_city vs a city.toml declaration", err)
+	}
+	advisories := compatDoltDriftAdvisories(cityPath, cfg)
+	if len(advisories) != 1 || !strings.Contains(advisories[0], `rig "frontend"`) {
+		t.Fatalf("advisories = %v, want one naming rig \"frontend\" so the drift stays visible", advisories)
 	}
 }
 
-func TestValidateCanonicalCompatDoltDriftRejectsInheritedRigCompatOverride(t *testing.T) {
+func TestValidateCanonicalCompatDoltDriftAdvisesInheritedRigCompatOverride(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "frontend")
 	t.Setenv("GC_BEADS", "bd")
@@ -10440,9 +10449,14 @@ dolt.auto-start: false
 		}},
 	}
 
-	err := validateCanonicalCompatDoltDrift(cityPath, cfg)
-	if err == nil || !strings.Contains(err.Error(), `rig "frontend"`) {
-		t.Fatalf("validateCanonicalCompatDoltDrift() error = %v, want inherited rig compat error", err)
+	// ga-298g8t: advisory, not a refusal — see the sibling test above for why a
+	// refusal on this shape is unaffordable on the city-start path.
+	if err := validateCanonicalCompatDoltDrift(cityPath, cfg); err != nil {
+		t.Fatalf("validateCanonicalCompatDoltDrift() error = %v, want no refusal for a derived inherited_city vs a city.toml declaration", err)
+	}
+	advisories := compatDoltDriftAdvisories(cityPath, cfg)
+	if len(advisories) != 1 || !strings.Contains(advisories[0], `rig "frontend"`) {
+		t.Fatalf("advisories = %v, want one naming rig \"frontend\" so the drift stays visible", advisories)
 	}
 }
 

@@ -189,6 +189,11 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	if err := validateCanonicalCompatDoltDrift(cityPath, cfg); err != nil {
 		return err
 	}
+	// Advisories never block the start, but they must be said out loud: an
+	// endpoint disagreement nobody can see is how ga-tmhxnd cost a day.
+	for _, advisory := range compatDoltDriftAdvisories(cityPath, cfg) {
+		fmt.Fprintf(stderr, "gc: warning: canonical/compat Dolt drift: %s\n", advisory) //nolint:errcheck // best-effort stderr
+	}
 	// Register per-city dolt config so env builders and isExternalDolt can
 	// read it without process-global env vars. This is the single
 	// registration point — supervisor, standalone, and reload all flow
@@ -1932,6 +1937,32 @@ func wrapInvalidEndpointStateError(scope string, err error) error {
 	}
 }
 
+// validateCanonicalCompatDoltDrift reports contradictions between the canonical
+// .beads config and the deprecated city.toml Dolt settings.
+//
+// It returns only HARD errors, because it is the first statement of
+// startBeadsLifecycle — which runs on `gc start` and on every controller config
+// reload — so anything it refuses rejects reloads and can stop the city coming
+// back. That is the ga-tmhxnd symptom class, and it is far too expensive a
+// response to a disagreement the next init would have reconciled.
+//
+// A hard error therefore means two DECLARATIONS contradict each other: a rig
+// file that states an endpoint disagreeing with city.toml, or a city.toml rig
+// endpoint that disagrees with an external city endpoint the rig mirrors. Those
+// are operator contradictions with no safe resolution, and failing closed is
+// right.
+//
+// Everything else comes back from compatDoltDriftAdvisories instead. See
+// ga-298g8t: a rig file carrying the DERIVED inherited_city while city.toml
+// declares an endpoint used to be a hard error, which made the two defences
+// protecting rig qcore's hub endpoint on 2026-08-27 mutually exclusive — the
+// operator's city.toml declaration, and the rig file being explicit. They only
+// avoided colliding because of the order the repair happened in; keys before
+// restore would have refused to start the city. inherited_city is not an
+// operator statement about where a store is, it is what the ABSENCE of city.toml
+// keys computes to, and a derived value must not veto a declaration. Same class
+// as ga-uurd84 one layer over: there an inference overwrote a declaration, here
+// it blocked one.
 func validateCanonicalCompatDoltDrift(cityPath string, cfg *config.City) error {
 	if cfg == nil || !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 		return nil
@@ -1970,9 +2001,11 @@ func validateCanonicalCompatDoltDrift(cityPath string, cfg *config.City) error {
 		switch rigState.EndpointOrigin {
 		case contract.EndpointOriginInheritedCity:
 			if cityState.EndpointOrigin == contract.EndpointOriginManagedCity {
-				if compatRigHost != "" || compatRigPort != "" {
-					return fmt.Errorf("deprecated rig dolt_host/dolt_port conflict with inherited canonical endpoint for rig %q", cfg.Rigs[i].Name)
-				}
+				// city.toml declares an endpoint for this rig while the rig file
+				// still carries the derived inherited_city. The declaration is
+				// the operator's; the file is stale and the next init
+				// reconciles it. Advisory, not a refusal (ga-298g8t) — see the
+				// doc comment above for why a refusal here is unaffordable.
 				break
 			}
 			if (compatRigHost != "" || compatRigPort != "") && !sameConfiguredExternalTarget(rigState.DoltHost, rigState.DoltPort, compatRigHost, compatRigPort) {
@@ -1985,6 +2018,42 @@ func validateCanonicalCompatDoltDrift(cityPath string, cfg *config.City) error {
 		}
 	}
 	return nil
+}
+
+// compatDoltDriftAdvisories reports canonical/compat Dolt disagreements that are
+// real and worth fixing but must not refuse a city start. Demoting them from
+// errors without reporting them anywhere would trade a startup landmine for a
+// silent one, which is the failure mode this whole family of bugs is made of.
+func compatDoltDriftAdvisories(cityPath string, cfg *config.City) []string {
+	if cfg == nil || !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
+		return nil
+	}
+	cityResolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, config.EffectiveHQPrefix(cfg))
+	if err != nil || cityResolved.Kind != contract.ScopeConfigAuthoritative {
+		return nil
+	}
+	if cityResolved.State.EndpointOrigin != contract.EndpointOriginManagedCity {
+		return nil
+	}
+	var advisories []string
+	for i := range cfg.Rigs {
+		rig := normalizedRigConfig(cityPath, cfg.Rigs[i])
+		rigResolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, rig.Path, rig.EffectivePrefix())
+		if err != nil || rigResolved.Kind != contract.ScopeConfigAuthoritative {
+			continue
+		}
+		if rigResolved.State.EndpointOrigin != contract.EndpointOriginInheritedCity {
+			continue
+		}
+		compatRigHost, compatRigPort := configuredExternalDoltTargetForRig(cfg.Rigs[i])
+		if compatRigHost == "" && compatRigPort == "" {
+			continue
+		}
+		advisories = append(advisories, fmt.Sprintf(
+			"rig %q: city.toml declares dolt endpoint %s but the rig's .beads/config.yaml still carries the derived gc.endpoint_origin: inherited_city; the declaration wins and the next rig init reconciles the file",
+			cfg.Rigs[i].Name, net.JoinHostPort(canonicalExternalHost(compatRigHost, compatRigPort), compatRigPort)))
+	}
+	return advisories
 }
 
 func sameConfiguredExternalTarget(aHost, aPort, bHost, bPort string) bool {
