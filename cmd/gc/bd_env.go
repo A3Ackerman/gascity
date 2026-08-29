@@ -346,11 +346,13 @@ func warnOnActorSessionMismatch(actor string) {
 		sessionName = strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	}
 	if actor == "" {
+		//nolint:errcheck // best-effort warning: a write failure must not block env projection
 		fmt.Fprintf(beadsActorWarnWriter,
 			"gc: WARNING: bd audit actor is unresolved inside gc session %q -- bd will fall back to git user.name and attribute these ledger writes to a HUMAN (ga-xs28em)\n",
 			sessionName)
 		return
 	}
+	//nolint:errcheck // best-effort warning: a write failure must not block env projection
 	fmt.Fprintf(beadsActorWarnWriter,
 		"gc: WARNING: bd audit actor %q does not name gc session %q -- ledger writes from this session will be attributed to %q (ga-xs28em)\n",
 		actor, sessionName, actor)
@@ -441,6 +443,24 @@ func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConn
 		env["GC_DOLT_PORT"] = target.Port
 	} else {
 		delete(env, "GC_DOLT_PORT")
+	}
+	recordManagedLocalDoltEnv(env, target)
+}
+
+// recordManagedLocalDoltEnv stamps contract.ManagedLocalDoltEnv so a
+// managed-city resolve run from this projected environment can tell an
+// external store's ambient GC_DOLT_HOST from a container's redirect of the
+// managed server (gc-49ho). An external target records "0"; a managed target
+// clears the key so an inherited "0" from a parent environment cannot outlive
+// the projection that made it true.
+func recordManagedLocalDoltEnv(env map[string]string, target contract.DoltConnectionTarget) {
+	if env == nil {
+		return
+	}
+	if target.External {
+		env[contract.ManagedLocalDoltEnv] = "0"
+	} else {
+		delete(env, contract.ManagedLocalDoltEnv)
 	}
 }
 
@@ -1391,7 +1411,11 @@ func applyLegacyRigExternalTarget(env map[string]string, rig config.Rig) contrac
 	if port != "" {
 		env["GC_DOLT_PORT"] = port
 	}
-	return contract.DoltConnectionTarget{Host: host, Port: port, External: true}
+	target := contract.DoltConnectionTarget{Host: host, Port: port, External: true}
+	// A legacy rig dolt_host is the qlandia city.toml shape, so this path is as
+	// load-bearing for gc-49ho as the canonical one.
+	recordManagedLocalDoltEnv(env, target)
+	return target
 }
 
 func rigRuntimeEnvIndependentOfCityProjection(cityPath, rigPath string, explicitRig *config.Rig) bool {

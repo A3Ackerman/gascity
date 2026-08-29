@@ -14,6 +14,8 @@ import (
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
+
+	"github.com/gastownhall/gascity/internal/doltauth"
 )
 
 type managedDoltSQLHealthReport struct {
@@ -95,7 +97,7 @@ func managedDoltReadOnlyProbeSQLFor(db string) string {
 }
 
 func managedDoltQueryProbe(host, port, user string) error {
-	if managedDoltPassword() != "" {
+	if managedDoltPassword(host, port) != "" {
 		return managedDoltQueryProbeDirectFn(host, port, user)
 	}
 	_, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q", "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA")
@@ -109,7 +111,7 @@ func managedDoltQueryProbe(host, port, user string) error {
 }
 
 func managedDoltReadOnlyState(host, port, user string) (string, error) {
-	if managedDoltPassword() != "" {
+	if managedDoltPassword(host, port) != "" {
 		return managedDoltReadOnlyStateDirectFn(host, port, user)
 	}
 	db, err := managedDoltSelectUserDatabase(host, port, user)
@@ -203,7 +205,7 @@ func managedDoltUserDatabases(lines []string) []string {
 }
 
 func managedDoltConnectionCount(host, port, user string) (string, error) {
-	if managedDoltPassword() != "" {
+	if managedDoltPassword(host, port) != "" {
 		return managedDoltConnectionCountDirectFn(host, port, user)
 	}
 	out, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q", "SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST")
@@ -259,8 +261,32 @@ func managedDoltHealthCheckFields(report managedDoltSQLHealthReport) []string {
 	}
 }
 
-func managedDoltPassword() string {
-	return strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD"))
+// managedDoltPassword returns the ambient GC_DOLT_PASSWORD for a direct dial of
+// host:port, declining it when the ambient identity provably belongs to a
+// different endpoint (doltauth.AmbientIdentityAppliesTo — the ambient identity
+// travels with the ambient endpoint).
+//
+// gc-49ho: after the 2026-08-27 qcore hub flip every crew session carried the
+// hub's credentials (GC_DOLT_HOST/PORT/PASSWORD for the external rig store).
+// The managed-Dolt helpers presented that password to the managed LOCAL
+// server, whose root has none, so the native-store identity probe failed with
+// Error 1045 and every city-store open was demoted to the bd fallback with
+// "database project_id could not be confirmed". A bare override — no ambient
+// endpoint — is still the operator's deliberate choice and applies everywhere.
+func managedDoltPassword(host, port string) string {
+	pass := strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD"))
+	if pass == "" || !ambientDoltIdentityAppliesTo(host, port) {
+		return ""
+	}
+	return pass
+}
+
+// ambientDoltIdentityAppliesTo adapts a cmd/gc host:port pair to doltauth's
+// endpoint-binding rule. An empty host is the managed loopback server, exactly
+// as the dial helpers treat it; an unparsable port compares as unknown.
+func ambientDoltIdentityAppliesTo(host, port string) bool {
+	portNum, _ := strconv.Atoi(strings.TrimSpace(port))
+	return doltauth.AmbientIdentityAppliesTo(managedDoltConnectHost(host), portNum)
 }
 
 func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
@@ -275,7 +301,7 @@ func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
 	}
 	cfg := mysql.NewConfig()
 	cfg.User = user
-	cfg.Passwd = managedDoltPassword()
+	cfg.Passwd = managedDoltPassword(host, port)
 	cfg.Net = "tcp"
 	cfg.Addr = host + ":" + port
 	cfg.Timeout = 5 * time.Second
@@ -389,7 +415,7 @@ func managedDoltConnectionCountDirect(host, port, user string) (string, error) {
 }
 
 func managedDoltResetProbe(host, port, user string) error {
-	if managedDoltPassword() != "" {
+	if managedDoltPassword(host, port) != "" {
 		return managedDoltResetProbeDirectFn(host, port, user)
 	}
 	if _, err := runManagedDoltSQL(host, port, user, "-q", "DROP DATABASE IF EXISTS "+managedDoltProbeDatabase); err != nil {
@@ -464,7 +490,7 @@ func runManagedDoltSQLContext(parent context.Context, host, port, user string, a
 		"--host", host,
 		"--port", port,
 		"--user", user,
-		"--password", managedDoltPassword(),
+		"--password", managedDoltPassword(host, port),
 		"--no-tls",
 		"sql",
 	}

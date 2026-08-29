@@ -506,7 +506,7 @@ func managedDoltOpenDatabase(host, port, user, database string) (*sql.DB, error)
 	}
 	cfg := mysql.NewConfig()
 	cfg.User = user
-	cfg.Passwd = managedDoltPassword()
+	cfg.Passwd = managedDoltPassword(host, port)
 	cfg.Net = "tcp"
 	cfg.Addr = host + ":" + port
 	cfg.DBName = database
