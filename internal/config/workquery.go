@@ -639,8 +639,20 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 		`fi; `
 }
 
-// ephemeralAssignedReadyProbeScript is the bd-1.0.4 wisp tier. It stays on
-// `bd query` because there is no federated form of it and it needs none: a
+// ephemeralAssignedReadyProbeScript is the wisp tier for an assigned-ready read.
+// It runs after the `bd ready --include-ephemeral` tier as a fallback: that
+// tier does not surface an assigned OPEN wisp — `bd ready --include-ephemeral
+// --assignee=X` returns [] for a wisp that `bd query "ephemeral=true AND
+// status=open AND assignee=X"` returns immediately — so the flag alone leaves an
+// agent whose formula pours, assigns, and leaves open a successor wisp with no
+// ready work until the row is hand-mutated to in_progress (the in-progress twin
+// has always carried this probe, which is why in_progress wisps were found and
+// their open siblings were not). The probe is purely additive: it runs only when
+// the ready tier above returned nothing, and it is identical across bd versions,
+// so the include-ephemeral flag no longer gates it out.
+//
+// It stays on `bd query` because there is no federated form of it and it needs
+// none: a
 // relocated class store has no bead-policy layer, so an orchestration wisp lands
 // there as a DURABLE row that the plain federated ready read already returns
 // (see splitEnv.mintWispWith). The ephemeral tier only exists where the policy
@@ -655,9 +667,7 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 // in_progress work-serving gate, so it must stay hold-transparent (ga-5736js;
 // pinned by TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels).
 func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) string {
-	if topo.includeEphemeralReady() {
-		return ""
-	}
+	_ = topo
 	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
 	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false)
 	return `open_ephemeral=$(` + bdQueryEphemeralStatusQuietShell("open") + `); ` +

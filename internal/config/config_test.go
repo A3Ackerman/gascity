@@ -1960,6 +1960,75 @@ esac
 	}
 }
 
+func TestEffectiveWorkQueryBD105SurfacesEphemeralOpenAssignedWork(t *testing.T) {
+	a := Agent{Name: "dog", Dir: "hello-world"}
+	out := runEffectiveWorkQueryForBeads(t, a, BeadsConfig{BDCompatibility: BeadsBDCompatibility105}, map[string]string{
+		"GC_SESSION_NAME": "hello-world/dog",
+	}, `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '[]'
+    ;;
+  ready)
+    printf '[]'
+    ;;
+  query)
+    case "$*" in
+      *"ephemeral=true AND status=open"*)
+        printf '[{"id":"ga-ephemeral-open","assignee":"hello-world/dog","status":"open","ephemeral":true,"issue_type":"task","dependency_count":0,"created_at":"2026-05-01T00:00:00Z"}]'
+        ;;
+      *)
+        printf '[]'
+        ;;
+    esac
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "ga-ephemeral-open") {
+		t.Fatalf("EffectiveWorkQueryForBeads(bd-1.0.5) did not surface an assigned ephemeral OPEN wisp; the include-ephemeral ready tier misses it and the probe must serve it: %q", out)
+	}
+}
+
+func TestEffectiveWorkQueryBD105EphemeralOpenProbeRespectsReadiness(t *testing.T) {
+	a := Agent{Name: "dog", Dir: "hello-world"}
+	out := runEffectiveWorkQueryForBeads(t, a, BeadsConfig{BDCompatibility: BeadsBDCompatibility105}, map[string]string{
+		"GC_SESSION_NAME": "hello-world/dog",
+	}, `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '[]'
+    ;;
+  ready)
+    printf '[]'
+    ;;
+  query)
+    case "$*" in
+      *"ephemeral=true AND status=open"*)
+        printf '[{"id":"ga-ephemeral-blocked","assignee":"hello-world/dog","status":"open","ephemeral":true,"issue_type":"task","dependency_count":1,"created_at":"2026-05-01T00:00:00Z"}]'
+        ;;
+      *)
+        printf '[]'
+        ;;
+    esac
+    ;;
+  show)
+    printf '[{"dependencies":[{"id":"ga-blocker","status":"open","dependency_type":"blocks"}]}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.Contains(out, "ga-ephemeral-blocked") {
+		t.Fatalf("EffectiveWorkQueryForBeads(bd-1.0.5) served a dependency-blocked open wisp; status=open is not a readiness query, so the probe must apply the epic and blocking-dependency rules: %q", out)
+	}
+}
+
 func TestEffectiveWorkQueryCustom(t *testing.T) {
 	a := Agent{Name: "mayor", WorkQuery: "bd ready --label=pool:polecats"}
 	got := a.EffectiveWorkQuery()
