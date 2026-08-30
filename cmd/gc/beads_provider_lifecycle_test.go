@@ -11747,6 +11747,75 @@ func TestVerifyManagedDoltDatabaseExistsAfterInitCatalogMatch(t *testing.T) {
 	}
 }
 
+// TestVerifyManagedDoltDatabaseExistsAfterInitSkipsExternalRigScopeInManagedLocalCity
+// pins hq-mbe2s: the post-init catalog verify must skip a rig whose OWN scope
+// declares an external endpoint, even though the CITY is managed-local. The
+// pre-fix guard checked isExternalDolt(cityPath) — the city — so a remote-hub
+// rig (qcore) in a managed-local city (qlandia) had its declared-remote database
+// looked up in the LOCAL managed catalog, where it does not exist (the local
+// qcore mirror was retired 2026-08-28), failing every reload rig-init. The guard
+// must resolve the RIG SCOPE's declared endpoint.
+func TestVerifyManagedDoltDatabaseExistsAfterInitSkipsExternalRigScopeInManagedLocalCity(t *testing.T) {
+	original := verifyManagedDoltDatabaseExistsAfterInit
+	originalListDatabases := managedDoltListUserDatabasesAfterInit
+	t.Cleanup(func() { managedDoltListUserDatabasesAfterInit = originalListDatabases })
+
+	cityPath := setupBdContractCityForTest(t)
+	// Reachable managed port so the external-scope skip is OBSERVABLE — without
+	// it the port=="" early return would mask whether the guard fired.
+	writeReachableProviderManagedDoltState(t, cityPath)
+
+	// A rig scope OUTSIDE the city whose .beads/config.yaml declares an explicit
+	// external endpoint (the qcore-on-hub topology).
+	rigScope := filepath.Join(t.TempDir(), "q-core")
+	rigBeads := filepath.Join(rigScope, ".beads")
+	if err := os.MkdirAll(rigBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, "config.yaml"), []byte("issue_prefix: qc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(`{"backend":"dolt","dolt_database":"qcore","dolt_mode":"server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, rigScope, contract.ConfigState{
+		IssuePrefix:    "qc",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "100.71.23.94",
+		DoltPort:       "3307",
+		DoltUser:       "alex",
+	}); err != nil {
+		t.Fatalf("ensureCanonicalScopeConfigState(external rig): %v", err)
+	}
+
+	// Preconditions that make the regression observable: the CITY is managed-local
+	// (so the old city-scoped guard would NOT fire), while the RIG SCOPE resolves
+	// to an external endpoint (so a scope-aware guard SHOULD fire).
+	if isExternalDolt(cityPath) {
+		t.Fatal("precondition: city must be managed-local so the city-scoped guard does not fire")
+	}
+	if target, ok, err := canonicalScopeDoltTarget(cityPath, rigScope); err != nil || !ok || !target.External {
+		t.Fatalf("precondition: rig scope must resolve External; got target=%+v ok=%v err=%v", target, ok, err)
+	}
+	if currentResolvableManagedDoltPort(cityPath) == "" {
+		t.Fatal("precondition: expected a resolvable managed port so the skip is observable")
+	}
+
+	called := false
+	managedDoltListUserDatabasesAfterInit = func(string) ([]string, error) {
+		called = true
+		return nil, fmt.Errorf("managed-local catalog lister must not run for an external rig scope")
+	}
+
+	if err := original(cityPath, rigScope, "qcore"); err != nil {
+		t.Fatalf("verify for an external rig scope in a managed-local city = %v, want nil (skip local catalog)", err)
+	}
+	if called {
+		t.Fatal("managed-local catalog lister was called for an external rig scope; the guard must be scope-aware")
+	}
+}
+
 func TestVerifyManagedDoltDatabaseExistsAfterInitUsesProviderStateWhenPublishedStateIsMissing(t *testing.T) {
 	original := verifyManagedDoltDatabaseExistsAfterInit
 	originalListDatabases := managedDoltListUserDatabasesAfterInit
