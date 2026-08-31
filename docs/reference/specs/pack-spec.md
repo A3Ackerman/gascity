@@ -958,7 +958,12 @@ The patch/default order is:
 8. Implicit agents are injected.
 9. Root city `[agent_defaults]` applies.
 
-If a patch target does not exist when the patch runs, loading fails.
+If a pack-level patch target does not exist when the patch runs, loading
+fails. A city-level patch whose target does not exist is skipped and recorded
+as a load warning naming the patch and the reason (`patches.agent[3] was NOT
+APPLIED: ...`): the skipped patch modifies nothing, every `gc` command prints
+the warning, and `gc config --validate` reports it as a validation error and
+exits non-zero.
 
 ### 2.7. Defaults
 
