@@ -102,7 +102,7 @@ func resolvePackRef(ref, declDir, cityRoot string, nonBlocking bool) (string, er
 		// parseRemoteInclude handles GitHub tree/blob URLs too
 		// (remotesource.Parse short-circuits to ParseGitHubTreeOrBlob),
 		// so a single parse covers both remote forms.
-		source, subpath, gitRef := parseRemoteInclude(ref)
+		source, _, gitRef := parseRemoteInclude(ref)
 		// packs.lock is authoritative for any remote source string it
 		// records, with or without an embedded ref: gc import install /
 		// upgrade already resolved the authored source to a commit and
@@ -125,20 +125,14 @@ func resolvePackRef(ref, declDir, cityRoot string, nonBlocking bool) (string, er
 			if cacheDir, ok, err := resolveLockedRemoteImport(key, cityRoot, nonBlocking); err != nil {
 				return "", err
 			} else if ok {
-				if subpath != "" {
-					return filepath.Join(cacheDir, subpath), nil
-				}
-				return cacheDir, nil
+				return cachedIncludeDir(ref, cacheDir)
 			}
 		}
 		cacheDir, err := fetchRemoteInclude(source, gitRef, cityRoot)
 		if err != nil {
 			return "", err
 		}
-		if subpath != "" {
-			return filepath.Join(cacheDir, subpath), nil
-		}
-		return cacheDir, nil
+		return cachedIncludeDir(ref, cacheDir)
 	}
 	return resolveConfigPath(ref, declDir, cityRoot), nil
 }

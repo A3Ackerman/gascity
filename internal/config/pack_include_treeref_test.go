@@ -1,0 +1,77 @@
+package config
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func slashRefCacheDir(t *testing.T) string {
+	t.Helper()
+	cache := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = cache
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "--quiet")
+	if err := os.MkdirAll(filepath.Join(cache, "examples", "bd"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "examples", "bd", "pack.toml"), []byte("[pack]\nname = \"bd\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", ".")
+	run("commit", "--quiet", "-m", "seed")
+	run("update-ref", "refs/remotes/origin/interim/box-dog", "HEAD")
+	run("update-ref", "refs/remotes/origin/main", "HEAD")
+	return cache
+}
+
+// The locked-import read path must serve a slash-named-ref tree source from
+// the cache the install populated: the naive first-slash split points at a
+// directory that does not exist, and re-deriving it on every config load is
+// what left the city in unresolved-import drift after a green install.
+func TestCachedIncludeDirRecoversSlashRefBoundary(t *testing.T) {
+	cache := slashRefCacheDir(t)
+	source := "https://github.com/example/repo/tree/interim/box-dog/examples/bd"
+
+	dir, err := cachedIncludeDir(source, cache)
+	if err != nil {
+		t.Fatalf("cachedIncludeDir: %v", err)
+	}
+	if want := filepath.Join(cache, "examples", "bd"); dir != want {
+		t.Fatalf("dir = %q, want %q", dir, want)
+	}
+}
+
+func TestCachedIncludeDirKeepsPlainSourcesUntouched(t *testing.T) {
+	cache := slashRefCacheDir(t)
+	dir, err := cachedIncludeDir("https://github.com/example/repo/tree/main/examples/bd", cache)
+	if err != nil {
+		t.Fatalf("cachedIncludeDir: %v", err)
+	}
+	if want := filepath.Join(cache, "examples", "bd"); dir != want {
+		t.Fatalf("dir = %q, want %q", dir, want)
+	}
+}
+
+func TestCachedIncludeDirRefusesLoudlyWhenNoBoundaryWorks(t *testing.T) {
+	cache := slashRefCacheDir(t)
+	_, err := cachedIncludeDir("https://github.com/example/repo/tree/interim/box-dog/no/such", cache)
+	if err == nil {
+		t.Fatal("expected a loud refusal")
+	}
+	if !strings.Contains(err.Error(), "interim") || !strings.Contains(err.Error(), "#") {
+		t.Errorf("error %q should name the ambiguous ref and the #ref escape", err.Error())
+	}
+}

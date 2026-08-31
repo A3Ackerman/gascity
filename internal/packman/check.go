@@ -517,6 +517,13 @@ func sortedImportNames(imports map[string]config.Import) []string {
 }
 
 func cachedPackDir(source, cachePath string) string {
+	// Recover the ref/subpath boundary for slash-named refs when the cache
+	// can answer it; on failure keep the naive join so the check layer's own
+	// missing-pack issue (whose repair hint is the install that raises the
+	// loud boundary error) reports the path it actually probed.
+	if dir, err := resolveCachedPackDir(source, cachePath); err == nil {
+		return dir
+	}
 	if subpath := normalizeRemoteSource(source).Subpath; subpath != "" {
 		return filepath.Join(cachePath, subpath)
 	}

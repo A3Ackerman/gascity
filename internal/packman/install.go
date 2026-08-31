@@ -48,9 +48,9 @@ func ReadCachedPackImports(source, commit string) (map[string]config.Import, err
 	if err != nil {
 		return nil, err
 	}
-	packPath := cachePath
-	if subpath := normalizeRemoteSource(source).Subpath; subpath != "" {
-		packPath = filepath.Join(packPath, subpath)
+	packPath, err := resolveCachedPackDir(source, cachePath)
+	if err != nil {
+		return nil, err
 	}
 	root, err := RepoCacheRoot()
 	if err != nil {
@@ -433,10 +433,7 @@ func (s *syncState) cachedPackPath(source, commit string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if subpath := normalizeRemoteSource(source).Subpath; subpath != "" {
-		cachePath = filepath.Join(cachePath, subpath)
-	}
-	return cachePath, nil
+	return resolveCachedPackDir(source, cachePath)
 }
 
 func (s *syncState) storeChosen(source string, pack LockedPack, refreshed bool) bool {
