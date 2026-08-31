@@ -351,8 +351,8 @@ func IsUnappliedPatchWarning(warning string) bool {
 // A PATCH THAT CANNOT BE APPLIED IS SKIPPED AND RECORDED, NOT FATAL
 // (ga-djvbvp). It used to abort the whole load, and because every gc command
 // loads config that meant one dangling reference stopped the entire city: on
-// 2026-08-25 a `gc bd update` on an unrelated bead died with
-// `patches.agent[12]: agent "cherub-law.conway" not found in merged config`
+// one fleet, a `gc bd update` on an unrelated bead died with
+// `patches.agent[12]: agent "binding-x.ghost" not found in merged config`
 // while a new seat was mid-stand-up. Standing up a seat touches the pack and
 // city.toml, and a local-path pack is live the instant it is written, so ANY
 // two-file edit opens a window where a reference exists and its target does

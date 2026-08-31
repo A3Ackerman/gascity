@@ -14,7 +14,7 @@ import (
 // deprecation is the deliberate contrast: a standing configuration choice
 // stays off unrelated commands, a condition of this invocation does not.
 func TestUnappliedPatchWarningIsAlwaysEmitted(t *testing.T) {
-	warning := `patches.agent[12] was NOT APPLIED: agent "cherub-law.conway" not found in merged config`
+	warning := `patches.agent[12] was NOT APPLIED: agent "binding-x.ghost" not found in merged config`
 
 	if !config.IsUnappliedPatchWarning(warning) {
 		t.Fatal("IsUnappliedPatchWarning did not recognize the emitted warning shape — the marker and the emitter have drifted apart")
@@ -54,7 +54,7 @@ func TestUnappliedPatchWarningReachesTheWriter(t *testing.T) {
 // until this test existed.
 func TestUnappliedPatchFailsConfigValidate(t *testing.T) {
 	warnings := []string{
-		`patches.agent[12] was NOT APPLIED: agent "cherub-law.conway" not found in merged config`,
+		`patches.agent[12] was NOT APPLIED: agent "binding-x.ghost" not found in merged config`,
 		`named_session "x": mode "always" with wake_mode "fresh" starts a fresh provider session after every drain`,
 		`patches.rigs[0] was NOT APPLIED: rig "ghostrig" not found in merged config`,
 	}
@@ -64,7 +64,7 @@ func TestUnappliedPatchFailsConfigValidate(t *testing.T) {
 	}
 	// BOTH, not just the first: the old ApplyPatches returned on the first bad
 	// patch and reported one defect per run.
-	if !strings.Contains(errs[0], "cherub-law.conway") || !strings.Contains(errs[1], "ghostrig") {
+	if !strings.Contains(errs[0], "binding-x.ghost") || !strings.Contains(errs[1], "ghostrig") {
 		t.Fatalf("promoted the wrong warnings: %q", errs)
 	}
 	// NON-VACUITY: an unrelated advisory must NOT become a validation error,

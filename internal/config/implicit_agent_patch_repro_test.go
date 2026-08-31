@@ -176,7 +176,7 @@ suspended = true
 	// The typo is STILL CAUGHT — the guarantee this test was written for — but
 	// no longer by aborting the load (ga-djvbvp). Every gc command loads
 	// config, so aborting meant one seat's typo stopped every agent in the
-	// city; on 2026-08-25 it killed a `gc bd update` on an unrelated bead.
+	// city; in one fleet it killed a `gc bd update` on an unrelated bead.
 	// It is now reported in provenance, printed by the CLI on every command,
 	// and fails `gc config --validate`.
 	_, prov, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
