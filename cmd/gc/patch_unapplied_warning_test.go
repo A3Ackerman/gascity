@@ -10,14 +10,14 @@ import (
 
 // An unapplied patch has to reach the operator on EVERY command, because the
 // whole reason it is now safe to skip a dangling patch instead of aborting the
-// load is that the skip is loud (ga-djvbvp). The always+fresh advisory is the
-// deliberate contrast: a standing configuration choice stays off unrelated
-// commands, a condition of this invocation does not.
+// load is that the skip is loud (ga-djvbvp). The legacy workspace-field
+// deprecation is the deliberate contrast: a standing configuration choice
+// stays off unrelated commands, a condition of this invocation does not.
 func TestUnappliedPatchWarningIsAlwaysEmitted(t *testing.T) {
 	warning := `patches.agent[12] was NOT APPLIED: agent "cherub-law.conway" not found in merged config`
 
 	if !config.IsUnappliedPatchWarning(warning) {
-		t.Fatal("IsUnappliedPatchWarning did not recognise the emitted warning shape — the marker and the emitter have drifted apart")
+		t.Fatal("IsUnappliedPatchWarning did not recognize the emitted warning shape — the marker and the emitter have drifted apart")
 	}
 	if !shouldEmitLoadCityConfigWarning(warning) {
 		t.Fatal("an unapplied patch must print on every command; suppressing it turns a loud outage into a silent misconfiguration")
@@ -27,13 +27,13 @@ func TestUnappliedPatchWarningIsAlwaysEmitted(t *testing.T) {
 	}
 
 	// CONTRAST, so this test fails if the filter degenerates into "emit
-	// everything": the always+fresh advisory must still be suppressed.
-	fresh := `named_session "x": mode "always" with wake_mode "fresh" on template "x" starts a fresh provider session after every drain; use only for a deliberate restart-per-cycle actor`
-	if shouldEmitLoadCityConfigWarning(fresh) {
-		t.Fatal("the always+fresh advisory must stay off unrelated commands (ga-3upjic); the filter is now emitting everything")
+	// everything": a suppressed standing advisory must stay suppressed.
+	suppressed := `city.toml: workspace.start_command is deprecated: Use per-agent start_command in agent.toml instead.`
+	if shouldEmitLoadCityConfigWarning(suppressed) {
+		t.Fatal("the legacy workspace-field deprecation must stay off unrelated commands; the filter is now emitting everything")
 	}
-	if config.IsUnappliedPatchWarning(fresh) {
-		t.Fatal("the always+fresh advisory must not be classified as an unapplied patch")
+	if config.IsUnappliedPatchWarning(suppressed) {
+		t.Fatal("the legacy workspace-field deprecation must not be classified as an unapplied patch")
 	}
 }
 

@@ -216,11 +216,12 @@ func TestApplyPatches_AgentRigWildcard(t *testing.T) {
 func TestApplyPatches_AgentRigWildcardNoMatch(t *testing.T) {
 	cfg := &City{Agents: []Agent{{Name: "mayor"}}}
 	err := ApplyPatches(cfg, Patches{Agents: []AgentPatch{{Name: "polecat", Rig: "*", Suspended: ptrBool(true)}}})
-	if err == nil {
-		t.Fatal("expected error")
+	if err != nil {
+		t.Fatalf("ApplyPatches must not fail on an unappliable wildcard: %v", err)
 	}
-	if !strings.Contains(err.Error(), "*/polecat") || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("error = %q, want wildcard not found", err)
+	requireUnappliedPatchWarning(t, cfg.LoadWarnings, "patches.agent[0]", "*/polecat", "not found")
+	if cfg.Agents[0].Suspended {
+		t.Fatal("a skipped wildcard patch modified an agent it did not match")
 	}
 }
 
@@ -253,21 +254,23 @@ func TestApplyPatches_AgentRigLegacyDirStillWorks(t *testing.T) {
 }
 
 func TestApplyPatches_AgentRigAndDirConflict(t *testing.T) {
-	cfg := &City{Agents: []Agent{{Name: "polecat", Dir: "rigA"}}}
-	err := ApplyPatches(cfg, Patches{Agents: []AgentPatch{{Name: "polecat", Dir: "rigA", Rig: "rigB"}}})
-	if err == nil {
-		t.Fatal("expected error")
+	cfg := &City{Agents: []Agent{{Name: "polecat", Dir: "rigA", Provider: "stay"}}}
+	err := ApplyPatches(cfg, Patches{Agents: []AgentPatch{{Name: "polecat", Dir: "rigA", Rig: "rigB", Provider: ptrStr("llama")}}})
+	if err != nil {
+		t.Fatalf("ApplyPatches must not fail on a malformed patch: %v", err)
 	}
-	if !strings.Contains(err.Error(), "use only one of dir or rig") {
-		t.Fatalf("error = %q", err)
+	requireUnappliedPatchWarning(t, cfg.LoadWarnings, "patches.agent[0]", "use only one of dir or rig")
+	if cfg.Agents[0].Provider != "stay" {
+		t.Fatal("a skipped dir+rig patch modified its would-be target")
 	}
 }
 
 // TestAgentPatch_Validate covers the write-boundary identity guard that the
 // HTTP patch API and the config editor both call before persisting a patch:
 // Name is required, and the legacy Dir key and the newer Rig key (including the
-// "*" wildcard) are mutually exclusive. A dir+rig patch would hard-fail the
-// next config load, so it must be rejected fail-fast rather than written.
+// "*" wildcard) are mutually exclusive. A dir+rig patch would be skipped (and
+// flagged by `gc config --validate`) on every subsequent load, so it must be
+// rejected fail-fast rather than written.
 func TestAgentPatch_Validate(t *testing.T) {
 	tests := []struct {
 		name    string

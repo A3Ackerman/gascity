@@ -221,7 +221,7 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 func shouldEmitLoadCityConfigWarning(warning string) bool {
 	// An unapplied patch is a CONDITION OF THIS INVOCATION, not a standing
 	// configuration choice, so it prints on every command — the opposite call
-	// from the always+fresh advisory below (ga-djvbvp). A patch that silently
+	// from the legacy workspace-field advisory below (ga-djvbvp). A patch that silently
 	// did nothing is how a typo survives forever, and the whole reason it is
 	// now safe to skip instead of aborting is that the skip is loud.
 	//

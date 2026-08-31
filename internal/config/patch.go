@@ -483,11 +483,12 @@ func (p *AgentPatch) TargetQualifiedName() string {
 // It enforces the AgentPatch identity contract every write boundary relies on:
 // Name is required, and the legacy Dir key and the newer Rig key (including the
 // "*" wildcard) are mutually exclusive. The HTTP patch API and the config editor
-// call this before persisting so a patch that would hard-fail the next config
-// load — an unresolvable dir+rig combination — can never be written to city.toml
-// and brick config loading. Apply-time resolution (agentPatchTargetDir and
-// applyAgentPatch) enforces the same rule for patches that arrive from other
-// sources, so this is a fail-fast guard at the edge, not the only guard.
+// call this before persisting so a patch that could never apply — an
+// unresolvable dir+rig combination — is rejected at write time instead of being
+// written to city.toml, where every subsequent load would skip it and warn.
+// Apply-time resolution (agentPatchTargetDir and applyAgentPatch) enforces the
+// same rule for patches that arrive from other sources, so this is a fail-fast
+// guard at the edge, not the only guard.
 func (p *AgentPatch) Validate() error {
 	if p.Name == "" {
 		return fmt.Errorf("agent patch: name is required")
