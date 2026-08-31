@@ -3,9 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/remotesource"
@@ -68,32 +66,7 @@ func cachedIncludeDir(source, cacheDir string) (string, error) {
 }
 
 // includeCacheRefs lists the branch and tag names a fetched cache already
-// knows without touching the network.
+// knows, read from the cache's own ref files — no subprocess, no network.
 func includeCacheRefs(cacheDir string) ([]string, error) {
-	cmd := exec.Command("git", "-C", cacheDir, "show-ref")
-	cmd.Env = git.SanitizedEnv()
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("listing cache refs: %w", err)
-	}
-	var refs []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			continue
-		}
-		ref := fields[1]
-		switch {
-		case strings.HasPrefix(ref, "refs/tags/"):
-			refs = append(refs, strings.TrimSuffix(strings.TrimPrefix(ref, "refs/tags/"), "^{}"))
-		case strings.HasPrefix(ref, "refs/remotes/"):
-			rest := strings.TrimPrefix(ref, "refs/remotes/")
-			if _, name, ok := strings.Cut(rest, "/"); ok && name != "HEAD" {
-				refs = append(refs, name)
-			}
-		case strings.HasPrefix(ref, "refs/heads/"):
-			refs = append(refs, strings.TrimPrefix(ref, "refs/heads/"))
-		}
-	}
-	return refs, nil
+	return git.LocalRefNames(cacheDir)
 }

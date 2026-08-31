@@ -2,7 +2,6 @@ package config
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,29 +10,21 @@ import (
 func slashRefCacheDir(t *testing.T) string {
 	t.Helper()
 	cache := t.TempDir()
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = cache
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
-			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
-		)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
+	if err := os.MkdirAll(filepath.Join(cache, ".git", "refs"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	run("init", "--quiet")
+	packed := "# pack-refs with: peeled fully-peeled sorted\n" +
+		"0123456789abcdef0123456789abcdef01234567 refs/remotes/origin/interim/box-dog\n" +
+		"0123456789abcdef0123456789abcdef01234567 refs/remotes/origin/main\n"
+	if err := os.WriteFile(filepath.Join(cache, ".git", "packed-refs"), []byte(packed), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(cache, "examples", "bd"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cache, "examples", "bd", "pack.toml"), []byte("[pack]\nname = \"bd\"\nschema = 1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	run("add", ".")
-	run("commit", "--quiet", "-m", "seed")
-	run("update-ref", "refs/remotes/origin/interim/box-dog", "HEAD")
-	run("update-ref", "refs/remotes/origin/main", "HEAD")
 	return cache
 }
 
