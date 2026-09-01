@@ -744,6 +744,16 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Name the cache root the clones landed in. This is the only place the
+	// writer's view of the repo cache is ever printed; the read side already
+	// names the directory it searched ("locked but not cached at <dir>"), so
+	// the two together turn a GC_HOME that differs between the shell that ran
+	// the install and the process that resolves the config into a one-line
+	// diagnosis instead of a mystery.
+	if root, err := packman.RepoCacheRoot(); err == nil {
+		fmt.Fprintf(stdout, "Installed %d remote import(s) into %s\n", len(lock.Packs), root) //nolint:errcheck
+		return 0
+	}
 	fmt.Fprintf(stdout, "Installed %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
 	return 0
 }

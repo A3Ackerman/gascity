@@ -1067,6 +1067,12 @@ func TestDoImportInstallWithNoImportsSucceeds(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Installed 0 remote import(s)") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
+	// The success line names the repo cache root the install wrote into, so a
+	// GC_HOME that differs between this shell and the process that later
+	// resolves the config is visible on both sides of the split.
+	if root, err := packman.RepoCacheRoot(); err == nil && !strings.Contains(stdout.String(), " into "+root) {
+		t.Fatalf("success line does not name the repo cache root %s: %q", root, stdout.String())
+	}
 	lock, err := packman.ReadLockfile(fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ReadLockfile: %v", err)
