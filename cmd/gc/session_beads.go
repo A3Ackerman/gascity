@@ -1110,6 +1110,36 @@ func unclaimWorkAssignedToRetiredSessionBead(
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
+				// ga-sdynmb: A RESTART IS NOT A RETIREMENT. When the closing
+				// session's assignee names a [[named_session]] that is STILL in
+				// the city config, that identity outlives this session bead:
+				// the controller respawns the same agent under the same
+				// identity and its own hook re-finds the work. Releasing here
+				// instead destroys the one signal the controller keys named
+				// demand on — namedWorkReady matches direct Assignee (and
+				// deliberately not raw gc.routed_to), the close path's
+				// fallbackRoute is "", the pool demand probe keys on
+				// gc.routed_to, releaseOrphanedPoolAssignmentsWhenSnapshotsComplete
+				// skips empty-routed beads, and witness orphan recovery is
+				// scoped to POOL/EPHEMERAL identities so named-session work is
+				// never dumped into the pool. Nothing picks the bead up again;
+				// one deployed city stranded 91 beads across eight agents this
+				// way in three roll windows.
+				//
+				// isConfiguredNamedSessionIdentity is structural (cfg only, no
+				// store lookup), so it holds exactly when the identity survives
+				// the close, and it already excludes a SUSPENDED named agent —
+				// whose work must still be released, since the named-session
+				// tier will not claim for a suspended agent. Ephemeral
+				// identifiers (the session bead ID, the "rig--agent"
+				// session_name form) do not match a configured identity and are
+				// still released, so work bound to a dying identifier is never
+				// stranded on it. A named session REMOVED from config matches
+				// nothing under any cfg either, so real retirement keeps its
+				// release semantics unchanged.
+				if isConfiguredNamedSessionIdentity(cfg, assignee) {
+					continue
+				}
 				work, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
 				if err != nil {
 					fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s via %q: %v\n", sessionBead.ID, assignee, err) //nolint:errcheck
@@ -1372,6 +1402,21 @@ func unclaimWorkAssignedToRetiredSessionInfo(
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
+				// Same still-configured-named-identity guard as the raw
+				// retirement form above (ga-sdynmb): that identity outlives the
+				// session, and namedWorkReady keys direct named demand on the
+				// kept Assignee. On this path the guard also stops the stranded
+				// repair from rerouting a configured named session's work into
+				// the pool queue via fallbackRoute — pool demand for a named
+				// session's own bare identity is exactly what
+				// isConfiguredNamedSessionIdentity exists to prevent
+				// (pool_desired_state.go, ga-i1d0tr Candidate B). Skipped work
+				// counts as neither Released nor Failed: it is not stranded,
+				// its recovery lane is the named tier, so a repair that leaves
+				// it in place is still a clean repair.
+				if isConfiguredNamedSessionIdentity(cfg, assignee) {
+					continue
+				}
 				work, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
 				if err != nil {
 					fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s via %q: %v\n", retiredSession.ID, assignee, err) //nolint:errcheck
