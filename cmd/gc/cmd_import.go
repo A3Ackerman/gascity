@@ -701,10 +701,28 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 	return 0
 }
 
+// intoRepoCacheRoot is the success-line suffix naming the repo cache root a
+// `gc import install` or `gc import upgrade` wrote into. Both commands clone
+// through packman.EnsureRepoInCache into the root this process resolves from
+// GC_HOME, and the read side already names the directory it searched
+// ("locked but not cached at <dir>"), so the two lines together turn a
+// GC_HOME that differs between the shell that ran the write and the process
+// that resolves the config into a one-line diagnosis instead of a mystery.
+func intoRepoCacheRoot(root string) string {
+	return " into " + root
+}
+
 func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	// Resolve the repo cache root the clones below land in, so the success
+	// line can name it (see intoRepoCacheRoot).
+	cacheRoot, err := packman.RepoCacheRoot()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import install: resolving repo cache root: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
@@ -744,17 +762,7 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Name the cache root the clones landed in. This is the only place the
-	// writer's view of the repo cache is ever printed; the read side already
-	// names the directory it searched ("locked but not cached at <dir>"), so
-	// the two together turn a GC_HOME that differs between the shell that ran
-	// the install and the process that resolves the config into a one-line
-	// diagnosis instead of a mystery.
-	if root, err := packman.RepoCacheRoot(); err == nil {
-		fmt.Fprintf(stdout, "Installed %d remote import(s) into %s\n", len(lock.Packs), root) //nolint:errcheck
-		return 0
-	}
-	fmt.Fprintf(stdout, "Installed %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
+	fmt.Fprintf(stdout, "Installed %d remote import(s)%s\n", len(lock.Packs), intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
 	return 0
 }
 
@@ -817,6 +825,14 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Resolve the repo cache root the clones below land in, so the success
+	// line can name it (see intoRepoCacheRoot).
+	cacheRoot, err := packman.RepoCacheRoot()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import upgrade: resolving repo cache root: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
 	var lock *packman.Lockfile
 	if target == "" {
 		lock, err = syncImports(cityPath, allImports, packman.InstallUpgrade)
@@ -854,9 +870,9 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if target == "" {
-		fmt.Fprintf(stdout, "Upgraded %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
+		fmt.Fprintf(stdout, "Upgraded %d remote import(s)%s\n", len(lock.Packs), intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
 	} else {
-		fmt.Fprintf(stdout, "Upgraded import %q\n", target) //nolint:errcheck
+		fmt.Fprintf(stdout, "Upgraded import %q%s\n", target, intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
 	}
 	return 0
 }
