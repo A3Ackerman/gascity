@@ -348,28 +348,45 @@ func TestStorageSplitShapeAgreesWithTheMigrationTarget(t *testing.T) {
 		Orders: config.StorageWorkBinding, Nudges: config.StorageWorkBinding,
 	}}}
 
+	single := messagingSplitConfig(filepath.Join(root, "store"))
+
+	pair := messagingSplitConfig(filepath.Join(root, "store"))
+	pair.Storage.Classes.Sessions = "infra"
+
 	for name, tc := range map[string]struct {
 		cfg          *config.City
 		shape        storageSplitShape
 		targetsSplit bool
+		classes      []config.StorageClass
 	}{
-		"the whole split":    {whole, storageSplitWhole, true},
-		"a partial split":    {partial, storageSplitUnsupported, false},
-		"work relocated":     {relocatedWork, storageSplitUnsupported, false},
-		"everything on work": {allWork, storageSplitNone, false},
-		"no storage section": {&config.City{}, storageSplitNone, false},
+		"the whole split":            {whole, storageSplitWhole, true, infraMigrationClasses},
+		"a single relocated class":   {single, storageSplitSingle, true, []config.StorageClass{config.StorageClassMessaging}},
+		"two classes short of whole": {pair, storageSplitUnsupported, false, nil},
+		"a partial split":            {partial, storageSplitUnsupported, false, nil},
+		"work relocated":             {relocatedWork, storageSplitUnsupported, false, nil},
+		"everything on work":         {allWork, storageSplitNone, false, nil},
+		"no storage section":         {&config.City{}, storageSplitNone, false, nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			shape, _ := storageSplitShapeOf(tc.cfg.EffectiveStorage())
 			if shape != tc.shape {
 				t.Errorf("shape = %d, want %d", shape, tc.shape)
 			}
-			_, ok, err := resolveInfraBindingTarget(root, tc.cfg)
+			target, ok, err := resolveInfraBindingTarget(root, tc.cfg)
 			if err != nil {
 				t.Fatalf("resolveInfraBindingTarget: %v", err)
 			}
 			if ok != tc.targetsSplit {
 				t.Errorf("the migration target resolved = %t, want %t; the served shape and the convergeable shape must be the same shape", ok, tc.targetsSplit)
+			}
+			if !ok {
+				return
+			}
+			// The target carries the classes the shape relocates, because
+			// every discipline downstream — the census, the copy, the
+			// equality proof — is scoped to exactly those and no others.
+			if got, want := fmt.Sprint(target.Classes), fmt.Sprint(tc.classes); got != want {
+				t.Errorf("the target relocates %s, want %s", got, want)
 			}
 		})
 	}

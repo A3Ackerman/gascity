@@ -240,6 +240,37 @@ func (s ClassSet) Classes() []coordclass.Class {
 // Empty reports whether no class belongs to the set.
 func (s ClassSet) Empty() bool { return len(s.Classes()) == 0 }
 
+// MintClass returns the class whose reserved id prefix a binding serving this
+// set mints under, and whether the set has one.
+//
+// A binding mints from one id sequence under one prefix, so a set has to
+// nominate a lead class. Graph leads whenever it is present: a whole split
+// mints gcg for every class it serves, and that is what every converged city
+// already holds. A set with exactly one infrastructure class leads with that
+// class, which is how a binding serving messaging alone mints gcm. Any other
+// set — empty, work alone (work carries the rig or HQ prefix, never a reserved
+// one), or several infrastructure classes without graph — has no single answer,
+// and the engines refuse it rather than pick one class's namespace for
+// another's beads.
+func (s ClassSet) MintClass() (coordclass.Class, bool) {
+	if s.graph {
+		return coordclass.ClassGraph, true
+	}
+	var lead coordclass.Class
+	found := 0
+	for _, class := range s.Classes() {
+		if !class.IsInfrastructure() {
+			continue
+		}
+		lead = class
+		found++
+	}
+	if found != 1 || s.work {
+		return coordclass.ClassWork, false
+	}
+	return lead, true
+}
+
 // Equal reports whether two typed class sets have identical members.
 func (s ClassSet) Equal(other ClassSet) bool {
 	return s.work == other.work && s.graph == other.graph && s.sessions == other.sessions &&

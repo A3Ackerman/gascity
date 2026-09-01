@@ -62,9 +62,17 @@ func (p *workspaceProvider) OpenEngine(spec storebinding.BindingSpec, classes st
 	if !served.Contains(classes) {
 		return nil, nil, fmt.Errorf("%w: binding %q is assigned classes this provider does not serve", ErrInvalidWorkspaceBinding, p.spec.Name)
 	}
-	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	// The prefix the workspace is required to mint under is its lead class's
+	// (storebinding.ClassSet.MintClass): graph for a whole split, the sole
+	// class for a single-class binding. A set that nominates no lead has no
+	// prefix this provider could require, so it is refused before the open.
+	lead, ok := classes.MintClass()
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: binding %q is assigned classes %v, which name no single reserved id prefix to mint under", ErrInvalidWorkspaceBinding, p.spec.Name, classes.Classes())
+	}
+	prefix, ok := config.ReservedClassPrefix(lead.String())
 	if !ok || prefix == "" {
-		return nil, nil, fmt.Errorf("%w: no reserved id prefix is registered for the %q class", ErrInvalidWorkspaceBinding, config.BeadClassGraph)
+		return nil, nil, fmt.Errorf("%w: no reserved id prefix is registered for the %q class", ErrInvalidWorkspaceBinding, lead)
 	}
 	if err := p.workspaceProvisioned(); err != nil {
 		return nil, nil, err

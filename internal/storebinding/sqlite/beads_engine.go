@@ -5,10 +5,11 @@ package sqlite
 //
 // The database and the id prefix are not chosen here. GraphPath resolves the
 // one file this provider's whole lifecycle already inspects, fences and opens,
-// and the reserved graph prefix comes from the shared prefix registry. Both are
-// taken from the same source the storage-class migration takes them from, so a
-// binding cannot be migrated into one database and served from another — a
-// drift that would report a healthy cutover into a file nothing ever reads.
+// and the reserved prefix is the assigned class set's lead class's, from the
+// shared prefix registry. Both are taken from the same source the
+// storage-class migration takes them from, so a binding cannot be migrated
+// into one database and served from another — a drift that would report a
+// healthy cutover into a file nothing ever reads.
 
 import (
 	"fmt"
@@ -91,9 +92,17 @@ func (p *beadsProvider) OpenEngine(spec storebinding.BindingSpec, classes storeb
 	if !served.Contains(classes) {
 		return nil, nil, fmt.Errorf("%w: binding %q is assigned classes this provider does not serve", ErrInvalidBeadsBinding, p.spec.Name)
 	}
-	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	// One id sequence, one prefix: the binding mints under its lead class's
+	// reserved prefix — graph for a whole split, the sole class otherwise —
+	// and a set that nominates no lead is refused here rather than served
+	// under a namespace that belongs to another class.
+	lead, ok := classes.MintClass()
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: binding %q is assigned classes %v, which name no single reserved id prefix to mint under", ErrInvalidBeadsBinding, p.spec.Name, classes.Classes())
+	}
+	prefix, ok := config.ReservedClassPrefix(lead.String())
 	if !ok || prefix == "" {
-		return nil, nil, fmt.Errorf("%w: no reserved id prefix is registered for the %q class", ErrInvalidBeadsBinding, config.BeadClassGraph)
+		return nil, nil, fmt.Errorf("%w: no reserved id prefix is registered for the %q class", ErrInvalidBeadsBinding, lead)
 	}
 	store, err := beads.OpenSQLiteStore(filepath.Dir(p.path),
 		beads.WithSQLiteStoreIDPrefix(prefix),

@@ -38,6 +38,18 @@ func infraSplitConfig(path string) *config.City {
 	}}
 }
 
+// messagingSplitConfig returns a city in the single-class shape: messaging
+// alone on one SQLite binding, work and the other four infrastructure classes
+// on the reserved work binding.
+func messagingSplitConfig(path string) *config.City {
+	cfg := infraSplitConfig(path)
+	cfg.Storage.Classes.Graph = config.StorageWorkBinding
+	cfg.Storage.Classes.Sessions = config.StorageWorkBinding
+	cfg.Storage.Classes.Orders = config.StorageWorkBinding
+	cfg.Storage.Classes.Nudges = config.StorageWorkBinding
+	return cfg
+}
+
 // migrateInfraClasses runs the operator command's migration body against an
 // already configured city and returns the same report the command builds.
 //
@@ -702,10 +714,12 @@ func TestVerifyInfraCopyFailsClosed(t *testing.T) {
 	}
 }
 
-// TestResolveInfraBindingTargetRecognizesOnlyTheWholeSplit pins the gate: no
-// [storage], a partial fan-out, a non-SQLite provider, and a relocated work
-// class all read as "not configured" rather than half-migrated.
-func TestResolveInfraBindingTargetRecognizesOnlyTheWholeSplit(t *testing.T) {
+// TestResolveInfraBindingTargetRecognizesWholeAndSingleClassSplits pins the
+// gate: no [storage], a partial fan-out, a non-SQLite provider, and a relocated
+// work class all read as "not configured" rather than half-migrated, while the
+// two shapes this build serves — the whole split and a single relocated class
+// — resolve a target that names exactly the classes they move.
+func TestResolveInfraBindingTargetRecognizesWholeAndSingleClassSplits(t *testing.T) {
 	cityPath := t.TempDir()
 
 	notConfigured := func(name string, cfg *config.City) {
@@ -720,6 +734,19 @@ func TestResolveInfraBindingTargetRecognizesOnlyTheWholeSplit(t *testing.T) {
 	partial := infraSplitConfig(".gc/store")
 	partial.Storage.Classes.Nudges = config.StorageWorkBinding
 	notConfigured("a partial infra fan-out", partial)
+
+	pair := messagingSplitConfig(".gc/store")
+	pair.Storage.Classes.Orders = "infra"
+	notConfigured("two relocated classes short of the whole", pair)
+
+	single := mustResolveInfraTarget(t, cityPath, messagingSplitConfig(".gc/store"))
+	if got := fmt.Sprint(single.Classes); got != fmt.Sprint([]config.StorageClass{config.StorageClassMessaging}) {
+		t.Fatalf("a messaging-only split targets classes %s, want messaging alone", got)
+	}
+	whole := mustResolveInfraTarget(t, cityPath, infraSplitConfig(".gc/store"))
+	if got := fmt.Sprint(whole.Classes); got != fmt.Sprint(infraMigrationClasses) {
+		t.Fatalf("the whole split targets classes %s, want every infrastructure class", got)
+	}
 
 	foreign := infraSplitConfig(".gc/store")
 	foreign.Storage.Bindings["infra"] = config.StorageBindingConfig{Provider: "postgres", ConfigRef: "city-infra"}
