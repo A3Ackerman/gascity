@@ -192,15 +192,34 @@ func TestGcHomeSplitWedgeIsRefused(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+	// A closure, not a package helper, on purpose: the resource census
+	// attributes calls to their enclosing top-level test, and this test's
+	// [[medium]] subprocess declaration in test/test-resources.toml covers
+	// exactly the git calls lexically inside it. A shared helper would put
+	// the exec.Command site back into the Small debt census.
+	gitInTest := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %s: %v", strings.Join(args, " "), out, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
 	repo := t.TempDir()
-	gitInTest(t, repo, "init", "-q", "-b", "main")
+	gitInTest(repo, "init", "-q", "-b", "main")
 	writeTestPack(t, repo, "packs/groom")
-	gitInTest(t, repo, "add", "-A")
-	gitInTest(t, repo, "commit", "-qm", "c1")
-	c1 := gitInTest(t, repo, "rev-parse", "HEAD")
+	gitInTest(repo, "add", "-A")
+	gitInTest(repo, "commit", "-qm", "c1")
+	c1 := gitInTest(repo, "rev-parse", "HEAD")
 
 	city := t.TempDir()
 	source := "file://" + repo + "//packs/groom"
@@ -234,9 +253,9 @@ func TestGcHomeSplitWedgeIsRefused(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "packs/groom", "README.md"), []byte("advanced\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitInTest(t, repo, "add", "-A")
-	gitInTest(t, repo, "commit", "-qm", "c2")
-	c2 := gitInTest(t, repo, "rev-parse", "HEAD")
+	gitInTest(repo, "add", "-A")
+	gitInTest(repo, "commit", "-qm", "c2")
+	c2 := gitInTest(repo, "rev-parse", "HEAD")
 
 	// The agent shell: GC_HOME never made it into this environment, so
 	// ImplicitGCHome falls back to $HOME/.gc. A test binary reports "" rather
@@ -262,21 +281,6 @@ func TestGcHomeSplitWedgeIsRefused(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(supervisorRoot, RepoCacheKey(source, c2))); !os.IsNotExist(err) {
 		t.Fatalf("supervisor cache gained a clone it never asked for: %v", err)
 	}
-}
-
-func gitInTest(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
-		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), out, err)
-	}
-	return strings.TrimSpace(string(out))
 }
 
 func writeTestPack(t *testing.T, root, sub string) {
