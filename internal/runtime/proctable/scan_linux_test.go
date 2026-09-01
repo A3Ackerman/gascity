@@ -171,3 +171,25 @@ func TestScanWithRootMissingEnvironSkipped(t *testing.T) {
 		t.Fatalf("got %d entries, want 0", len(got))
 	}
 }
+
+// A tmux server founded by a session's first new-session call inherits that
+// session's GC_SESSION_ID and reparents to init, so the parent test alone
+// reports it as an agent root — and the orphan sweep then kills the one server
+// every agent in the city shares (gastownhall/gascity#5392).
+func TestScanWithRootNeverReportsInfrastructureAsRoot(t *testing.T) {
+	root := t.TempDir()
+	buildFakeProc(t, root, 100, map[string]string{"GC_SESSION_ID": "hq-session"})
+	if err := os.WriteFile(filepath.Join(root, "100", "comm"), []byte("tmux: server\n"), 0o644); err != nil {
+		t.Fatalf("write comm: %v", err)
+	}
+
+	got, err := scanWithRoot(root, "hq-session")
+	if err != nil {
+		t.Fatalf("scanWithRoot: %v", err)
+	}
+	for _, rt := range got {
+		if rt.PID == 100 {
+			t.Fatalf("scanWithRoot reported the tmux server as an agent root: %+v", got)
+		}
+	}
+}

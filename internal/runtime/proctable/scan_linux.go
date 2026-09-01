@@ -47,6 +47,9 @@ func IsScanRoot(pid int) bool {
 	if sessionID == "" {
 		return false
 	}
+	if isInfrastructureProcess(scanRoot, pid) {
+		return false
+	}
 	isRoot, err := isRootWithSessionID(scanRoot, pid, sessionID)
 	return err == nil && isRoot
 }
@@ -85,6 +88,14 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 			continue
 		}
 		if id != "" && sessionID != id {
+			continue
+		}
+		// Infrastructure is never an agent root, whoever its parent is: the
+		// tmux server a session founded inherits its GC_SESSION_ID and
+		// reparents to init, and the parent test below would report it — and
+		// the orphan sweep would kill the server every agent in the city
+		// shares (gastownhall/gascity#5392).
+		if isInfrastructureProcess(root, pid) {
 			continue
 		}
 		rootProcess, err := isRootWithSessionID(root, pid, sessionID)
@@ -169,13 +180,15 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureParent(root, ppid) {
+	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureProcess(root, ppid) {
 		return true, nil
 	}
 	return parentEnv["GC_SESSION_ID"] != sessionID, nil
 }
 
-func isInfrastructureParent(root string, pid int) bool {
+// isInfrastructureProcess reports whether pid's command names infrastructure
+// (a tmux server) rather than an agent.
+func isInfrastructureProcess(root string, pid int) bool {
 	data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "comm"))
 	if err != nil {
 		return false
