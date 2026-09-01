@@ -4151,15 +4151,29 @@ func TestSweepClosedOrderTrackingRetentionRetainsRootsThatStillOwnOpenSteps(t *t
 	)
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	deleted, err := sweepClosedOrderTrackingRetention(store, now, orderTrackingRetentionPolicy{
-		deleteAfterClose: 24 * time.Hour,
-		retainLast:       minClosedOrderTrackingRetained,
-	}, nil)
+	var (
+		deleted int
+		err     error
+	)
+	logOutput := captureWispGCLog(t, func() {
+		deleted, err = sweepClosedOrderTrackingRetention(store, now, orderTrackingRetentionPolicy{
+			deleteAfterClose: 24 * time.Hour,
+			retainLast:       minClosedOrderTrackingRetained,
+		}, nil)
+	})
 	if err != nil {
 		t.Fatalf("sweepClosedOrderTrackingRetention: %v", err)
 	}
 	if deleted != 1 {
 		t.Fatalf("deleted = %d, want 1 (alpha-01 only; alpha-00 still owns an open step)", deleted)
+	}
+	// A retained root is only actionable if the log says WHICH root: a count
+	// alone leaves the operator to re-derive it from the store.
+	if !strings.Contains(logOutput, "alpha-00") {
+		t.Fatalf("retention log = %q, want the retained root alpha-00 named", logOutput)
+	}
+	if strings.Contains(logOutput, "alpha-01") {
+		t.Fatalf("retention log = %q, names alpha-01, which was pruned, not retained", logOutput)
 	}
 
 	// Assert the ROOT/STEP PAIR, not just the root's survival: the defect is

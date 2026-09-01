@@ -1920,7 +1920,7 @@ func workflowDeleteStoreLabel(cfg *config.City, cityPath, scopePath string) stri
 	return scopePath
 }
 
-// ErrWorkflowDeleteLiveDescendants marks a REFUSED workflow delete: the bead
+// errWorkflowDeleteLiveDescendants marks a REFUSED workflow delete: the bead
 // still owns open descendants that are not themselves part of this delete, so
 // removing it would strand live, claimable work.
 //
@@ -1928,10 +1928,20 @@ func workflowDeleteStoreLabel(cfg *config.City, cityPath, scopePath string) stri
 // metadata fails with an out-of-vocabulary gc.failure_class, closes fail, and
 // mails an escalation, so the workflow becomes an escalation-mail generator
 // with zero forward progress (ga-033u0e). Scheduled pruners (order-tracking
-// retention, wisp GC) must treat this as a SKIP rather than a failure: the
-// candidate becomes eligible again on a later sweep once its descendants
-// reach a terminal state.
-var ErrWorkflowDeleteLiveDescendants = errors.New("workflow bead still owns live descendants")
+// retention, wisp GC) must treat this as a SKIP rather than a failure — not
+// joined into the sweep error, not charged to a batch cap: the candidate
+// becomes eligible again on a later sweep once its descendants reach a
+// terminal state, and a refusal charged to a cap on every sweep would starve
+// the collectible candidates listed behind it.
+var errWorkflowDeleteLiveDescendants = errors.New("workflow bead still owns live descendants")
+
+// workflowDeleteRefusal is the errWorkflowDeleteLiveDescendants error for id,
+// naming the open descendants that hold it. gc workflow delete-source prints
+// it verbatim on its delete_error= line, so it must let the operator find the
+// steps, not just the root.
+func workflowDeleteRefusal(id string, open []string) error {
+	return fmt.Errorf("%w: %s (open descendants: %s)", errWorkflowDeleteLiveDescendants, id, strings.Join(open, ","))
+}
 
 // workflowDeleteSkip builds the storeHasOpenDescendants skip predicate for a
 // delete of alsoDeleting. An open descendant does not block the delete when it
@@ -1952,7 +1962,7 @@ func workflowDeleteSkip(alsoDeleting map[string]struct{}) func(beads.Bead) bool 
 
 // assertWorkflowDeleteLeavesNothingStranded refuses a delete of id when it
 // still owns open descendants outside alsoDeleting. It uses the authoritative
-// storeHasOpenDescendants view (membership index, falling back to the tree
+// storeOpenDescendantIDs view (membership index, falling back to the tree
 // walk) so partial-stamp molecules — steps linked only by ParentID, with no
 // gc.root_bead_id — are seen too.
 //
@@ -1962,12 +1972,12 @@ func workflowDeleteSkip(alsoDeleting map[string]struct{}) func(beads.Bead) bool 
 // rather than guessing. A bead that lingers one more sweep is recoverable; a
 // stranded workflow is not.
 func assertWorkflowDeleteLeavesNothingStranded(store beads.Store, id string, alsoDeleting map[string]struct{}) error {
-	open, err := storeHasOpenDescendants(store, id, workflowDeleteSkip(alsoDeleting))
+	open, err := storeOpenDescendantIDs(store, id, workflowDeleteSkip(alsoDeleting))
 	if err != nil {
 		return fmt.Errorf("checking live descendants of %s: %w", id, err)
 	}
-	if open {
-		return fmt.Errorf("%w: %s", ErrWorkflowDeleteLiveDescendants, id)
+	if len(open) > 0 {
+		return workflowDeleteRefusal(id, open)
 	}
 	return nil
 }
@@ -2001,11 +2011,15 @@ func assertWorkflowDeleteSetLeavesNothingStranded(store beads.Store, ids []strin
 		if err != nil {
 			return fmt.Errorf("checking live descendants of %s: %w", id, err)
 		}
+		var open []string
 		for _, b := range members {
 			if b.ID == id || b.Status == "closed" || skip(b) {
 				continue
 			}
-			return fmt.Errorf("%w: %s (open descendant %s)", ErrWorkflowDeleteLiveDescendants, id, b.ID)
+			open = append(open, b.ID)
+		}
+		if len(open) > 0 {
+			return workflowDeleteRefusal(id, open)
 		}
 	}
 	return nil
@@ -2020,7 +2034,9 @@ func deleteWorkflowBeads(store beads.Store, ids []string) (int, []error) {
 	}
 	for _, id := range ids {
 		if err := assertWorkflowDeleteLeavesNothingStranded(store, id, deleting); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", id, err))
+			// The guard's errors already name the bead; prefixing it again
+			// would print the id twice on delete-source's delete_error= line.
+			errs = append(errs, err)
 			continue
 		}
 		if err := deleteWorkflowBeadUnguarded(store, id); err != nil {

@@ -6653,8 +6653,11 @@ func TestDeleteWorkflowBeadRefusesRootWithOpenDescendant(t *testing.T) {
 	}
 
 	err = deleteWorkflowBead(store, root.ID)
-	if !errors.Is(err, ErrWorkflowDeleteLiveDescendants) {
-		t.Fatalf("deleteWorkflowBead(root) err = %v, want ErrWorkflowDeleteLiveDescendants", err)
+	if !errors.Is(err, errWorkflowDeleteLiveDescendants) {
+		t.Fatalf("deleteWorkflowBead(root) err = %v, want errWorkflowDeleteLiveDescendants", err)
+	}
+	if !strings.Contains(err.Error(), step.ID) {
+		t.Fatalf("deleteWorkflowBead(root) err = %q, want the open step %s named so the refusal is actionable", err, step.ID)
 	}
 	if _, err := store.Get(root.ID); err != nil {
 		t.Fatalf("root must survive a refused delete: %v", err)
@@ -6713,11 +6716,12 @@ func TestDeleteWorkflowBeadsBatchRefusesOpenDescendantOutsideSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(root): %v", err)
 	}
-	if _, err := store.Create(beads.Bead{
+	step, err := store.Create(beads.Bead{
 		Title:    "live step outside the collected closure",
 		Type:     "task",
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Create(step): %v", err)
 	}
 	if err := store.Close(root.ID); err != nil {
@@ -6725,11 +6729,143 @@ func TestDeleteWorkflowBeadsBatchRefusesOpenDescendantOutsideSet(t *testing.T) {
 	}
 
 	err = deleteWorkflowBeadsBatch(store, []string{root.ID})
-	if !errors.Is(err, ErrWorkflowDeleteLiveDescendants) {
-		t.Fatalf("deleteWorkflowBeadsBatch err = %v, want ErrWorkflowDeleteLiveDescendants", err)
+	if !errors.Is(err, errWorkflowDeleteLiveDescendants) {
+		t.Fatalf("deleteWorkflowBeadsBatch err = %v, want errWorkflowDeleteLiveDescendants", err)
+	}
+	if !strings.Contains(err.Error(), step.ID) {
+		t.Fatalf("deleteWorkflowBeadsBatch err = %q, want the open step %s named", err, step.ID)
 	}
 	if _, err := store.Get(root.ID); err != nil {
 		t.Fatalf("root must survive a refused batch delete: %v", err)
+	}
+}
+
+// TestDeleteWorkflowBeadsRefusalNamesRootOnceAndOpenSteps pins the shape of
+// the refusal gc workflow delete-source prints verbatim on its delete_error=
+// line: the root named once (the guard's error already carries it, so the
+// per-id wrapper must not prefix it again) and every open step holding the
+// root named too, so the operator can find them without a second query.
+func TestDeleteWorkflowBeadsRefusalNamesRootOnceAndOpenSteps(t *testing.T) {
+	store := beads.NewMemStoreFrom(100, []beads.Bead{
+		{ID: "wf-root", Title: "workflow root", Status: "closed", Type: "task"},
+		{
+			ID: "wf-step-a", Title: "live step", Status: "open", Type: "task",
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "wf-root"},
+		},
+		{
+			ID: "wf-step-b", Title: "live step", Status: "open", Type: "task",
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "wf-root"},
+		},
+	}, nil)
+
+	deleted, errs := deleteWorkflowBeads(store, []string{"wf-root"})
+	if deleted != 0 || len(errs) != 1 {
+		t.Fatalf("deleteWorkflowBeads = (%d, %v), want (0, one refusal)", deleted, errs)
+	}
+	if !errors.Is(errs[0], errWorkflowDeleteLiveDescendants) {
+		t.Fatalf("errs[0] = %v, want errWorkflowDeleteLiveDescendants", errs[0])
+	}
+	msg := errs[0].Error()
+	if n := strings.Count(msg, "wf-root"); n != 1 {
+		t.Fatalf("errs[0] = %q, names the root %d times, want exactly once", msg, n)
+	}
+	for _, step := range []string{"wf-step-a", "wf-step-b"} {
+		if !strings.Contains(msg, step) {
+			t.Fatalf("errs[0] = %q, want open step %s named", msg, step)
+		}
+	}
+	if _, err := store.Get("wf-root"); err != nil {
+		t.Fatalf("root must survive a refused delete: %v", err)
+	}
+}
+
+// TestWorkflowDeleteFailsClosedWhenDescendantViewUnreadable covers the
+// fail-closed branch of every delete entry point: when the descendant view
+// cannot be read, the guard cannot prove the delete strands nothing, so the
+// read error propagates and the bead survives. The error is deliberately NOT
+// the refusal sentinel — an unreadable store is a sweep failure the pruners
+// must surface, not a skip they may quietly retry forever.
+func TestWorkflowDeleteFailsClosedWhenDescendantViewUnreadable(t *testing.T) {
+	cases := []struct {
+		name   string
+		delete func(beads.Store, string) error
+	}{
+		{name: "deleteWorkflowBead", delete: deleteWorkflowBead},
+		{name: "deleteWorkflowBeads", delete: func(store beads.Store, id string) error {
+			_, errs := deleteWorkflowBeads(store, []string{id})
+			return errors.Join(errs...)
+		}},
+		{name: "deleteWorkflowBeadsBatch", delete: func(store beads.Store, id string) error {
+			return deleteWorkflowBeadsBatch(store, []string{id})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			root, err := backing.Create(beads.Bead{Title: "workflow root", Type: "task"})
+			if err != nil {
+				t.Fatalf("Create(root): %v", err)
+			}
+			if err := backing.Close(root.ID); err != nil {
+				t.Fatalf("Close(root): %v", err)
+			}
+
+			err = tc.delete(failingListStore{backing}, root.ID)
+			if err == nil {
+				t.Fatal("delete succeeded with an unreadable descendant view; the guard must fail closed")
+			}
+			if !errors.Is(err, errDarkLeg{}) {
+				t.Fatalf("err = %v, want the store's read error propagated", err)
+			}
+			if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+				t.Fatalf("err = %v, must not read as a refusal: pruners skip refusals, an unreadable view must surface", err)
+			}
+			if _, err := backing.Get(root.ID); err != nil {
+				t.Fatalf("root must survive a delete the guard could not prove safe: %v", err)
+			}
+		})
+	}
+}
+
+// TestDeleteWorkflowBeadIgnoresTransientNotificationDescendants covers the
+// carve-out in workflowDeleteSkip: an open nudge chore or mail bead owned by
+// the root is delivery residue reaped on its own TTL, not live work, so it
+// neither blocks the delete nor appears among the named open descendants —
+// the same carve-out the single-flight dispatch gate makes, so a lingering
+// notification cannot wedge retention forever.
+func TestDeleteWorkflowBeadIgnoresTransientNotificationDescendants(t *testing.T) {
+	owned := func(id, title, beadType string, labels ...string) beads.Bead {
+		return beads.Bead{
+			ID: id, Title: title, Status: "open", Type: beadType, Labels: labels,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "wf-root"},
+		}
+	}
+	store := beads.NewMemStoreFrom(100, []beads.Bead{
+		{ID: "wf-root", Title: "workflow root", Status: "closed", Type: "task"},
+		owned("wf-mail", "escalation mail", "message"),
+		owned("wf-nudge", "wake nudge", nudgeBeadType, nudgeBeadLabel),
+		owned("wf-step", "live step", "task"),
+	}, nil)
+
+	// While a real step is open the delete is refused, and the refusal names
+	// that step alone: the chores are not what holds the root.
+	err := deleteWorkflowBead(store, "wf-root")
+	if !errors.Is(err, errWorkflowDeleteLiveDescendants) {
+		t.Fatalf("deleteWorkflowBead(wf-root) err = %v, want errWorkflowDeleteLiveDescendants", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "wf-step") || strings.Contains(msg, "wf-mail") || strings.Contains(msg, "wf-nudge") {
+		t.Fatalf("refusal = %q, want wf-step named and the transient chores omitted", msg)
+	}
+
+	// With only the chores left open there is no live work to strand.
+	if err := store.Close("wf-step"); err != nil {
+		t.Fatalf("Close(wf-step): %v", err)
+	}
+	if err := deleteWorkflowBead(store, "wf-root"); err != nil {
+		t.Fatalf("deleteWorkflowBead(wf-root) with only transient chores open: %v", err)
+	}
+	if _, err := store.Get("wf-root"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(wf-root) err = %v, want ErrNotFound", err)
 	}
 }
 
