@@ -75,8 +75,11 @@ func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveR
 	return out
 }
 
-// IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
-// envelope and should be treated as an agent root.
+// IsScanRoot reports whether pid should be treated as an agent root. A root
+// carries a GC_SESSION_ID, is not itself infrastructure — a tmux server or
+// client is never a root, whoever its parent is — and sits outside its
+// parent's envelope: the parent is gone, carries a different GC_SESSION_ID,
+// or is infrastructure.
 func IsScanRoot(pid int) bool {
 	if err := liveScanGuard(); err != nil {
 		return false

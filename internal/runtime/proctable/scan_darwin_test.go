@@ -31,3 +31,19 @@ func TestIsRecordScanRootRefusesInfrastructure(t *testing.T) {
 		t.Fatal("the agent under an infrastructure parent must remain a root")
 	}
 }
+
+// Infrastructure is matched by exact name: a tmux-* wrapper running as an
+// agent root is reported, where a substring test on "tmux" would hide it — and
+// a root the scan hides is a runtime the orphan sweep can never reap.
+func TestScanRecordsBySessionIDReportsTmuxWrapperAsRoot(t *testing.T) {
+	records := map[int]psRecord{
+		200: {pid: 200, ppid: 1, command: "/usr/local/bin/tmux-wrapper", env: map[string]string{"GC_SESSION_ID": "hq-session"}},
+	}
+	got := scanRecordsBySessionID(records, "hq-session")
+	if len(got) != 1 || got[0].PID != 200 {
+		t.Fatalf("scanRecordsBySessionID = %+v, want the tmux-wrapper agent pid 200 reported as a root", got)
+	}
+	if !isRecordScanRoot(records, records[200]) {
+		t.Fatal("isRecordScanRoot refused the tmux-wrapper agent as a root")
+	}
+}

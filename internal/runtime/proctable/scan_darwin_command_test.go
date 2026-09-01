@@ -24,3 +24,20 @@ func TestDarwinPSCommandStillIdentifiesTmuxExecutable(t *testing.T) {
 		t.Fatal("tmux executable was not classified as infrastructure")
 	}
 }
+
+// The infrastructure match is exact on the path-stripped name: the tmux
+// executable as ps reports it on Darwin, and the titles tmux sets through
+// setproctitle as Linux comm reports them (newline-terminated). Anything
+// else — above all a tmux-* wrapper — is a candidate agent root.
+func TestIsInfrastructureCommandMatchesExactNamesOnly(t *testing.T) {
+	for _, command := range []string{"tmux", "/opt/homebrew/bin/tmux", "tmux: server", "tmux: client", "tmux: server\n"} {
+		if !isInfrastructureCommand(command) {
+			t.Errorf("isInfrastructureCommand(%q) = false, want true", command)
+		}
+	}
+	for _, command := range []string{"", "claude", "/bin/bash", "tmux-wrapper", "/usr/local/bin/tmux-wrapper", "tmuxinator", "my-tmux"} {
+		if isInfrastructureCommand(command) {
+			t.Errorf("isInfrastructureCommand(%q) = true, want false: only an exact tmux name is infrastructure", command)
+		}
+	}
+}

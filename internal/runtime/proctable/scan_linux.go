@@ -24,8 +24,11 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	return scanWithRoot(scanRoot, id)
 }
 
-// IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
-// envelope and should be treated as an agent root.
+// IsScanRoot reports whether pid should be treated as an agent root. A root
+// carries a GC_SESSION_ID, is not itself infrastructure — a tmux server or
+// client is never a root, whoever its parent is — and sits outside its
+// parent's envelope: the parent is gone, carries a different GC_SESSION_ID,
+// or is infrastructure.
 func IsScanRoot(pid int) bool {
 	if err := liveScanGuard(); err != nil {
 		return false
@@ -186,15 +189,14 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 	return parentEnv["GC_SESSION_ID"] != sessionID, nil
 }
 
-// isInfrastructureProcess reports whether pid's command names infrastructure
-// (a tmux server) rather than an agent.
+// isInfrastructureProcess reports whether pid's comm names infrastructure (a
+// tmux server or client) rather than an agent; see isInfrastructureCommand.
 func isInfrastructureProcess(root string, pid int) bool {
 	data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "comm"))
 	if err != nil {
 		return false
 	}
-	command := strings.ToLower(strings.TrimSpace(string(data)))
-	return strings.Contains(command, "tmux")
+	return isInfrastructureCommand(string(data))
 }
 
 func readParentPID(path string) (int, bool, error) {
