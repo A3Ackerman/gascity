@@ -502,6 +502,10 @@ func buildDesiredStateWithSessionBeadsAt(
 			activeStores = append(activeStores, activeStore{store: s, ref: rig.Name})
 		}
 	}
+	// The store a control dispatcher's rows actually live in, asked once per
+	// build from the residency plan rather than guessed from config. Non-nil
+	// only on a city converged onto a class binding; see its doc comment.
+	controlBinding := convergedRoutedWorkBinding(cityPath, cfg, store, rigStores, suspendedRigPaths)
 
 	for i := range cfg.Agents {
 		if cfg.Agents[i].Suspended {
@@ -585,7 +589,7 @@ func buildDesiredStateWithSessionBeadsAt(
 			// retention for configured named-session beads.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if store != nil && !hasCustomScaleCheck {
-				ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
+				ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
 				// mode='always': named session is unconditionally desired by the named
 				// pass; pool demand is redundant and creates {name}-N phantoms when N
 				// routed beads arrive. mode='on_demand': pool demand wakes the sleeping
@@ -661,7 +665,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// new unassigned demand while assigned work drives resume requests.
 		poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 		if store != nil && !hasCustomScaleCheck {
-			ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
+			ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
 			defaultScaleTargets = append(defaultScaleTargets, ownTarget)
 			// Cross-store demand (FR-S0.1 / vp-s37): a rig pool's routed demand
 			// may live in the city store (vp-kvp cross-store delivery), which
@@ -1743,6 +1747,85 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 	return result
 }
 
+// convergedRoutedWorkBinding reports the one class binding a city serves ALL
+// its routed work from, or nil when it serves any of it from a work ledger.
+//
+// The question is answered from the residency plan, not from config: the legs
+// come from routedWorkStoreCandidates, the same set collectOpenUnassignedRoutedWork
+// reads, so demand and collection cannot disagree about where routed work is.
+// A converged split narrows (storeref.Narrow, runtime plane) to nothing but its
+// binding legs, so "every leg is a class ref" IS "this city is converged"; a
+// city that relocates nothing keeps its work leg and answers nil.
+//
+// Two bindings would mean a per-class fan-out no constructor in this build
+// produces (TestTopologyConstructorsServeOnlyTheWholeSplit); until one can,
+// a plan that named more than one store gets the same conservative nil as a
+// legacy city rather than a guess about which one holds control work.
+func convergedRoutedWorkBinding(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+) beads.Store {
+	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	// An unresolvable topology takes the same conservative nil as a legacy city:
+	// fall back to the legacy target rather than guess a store. The error is not
+	// swallowed — collectOpenUnassignedRoutedWork resolves this same leg set later
+	// in this build and reports it there.
+	if err != nil || len(legs) == 0 {
+		return nil
+	}
+	var binding beads.Store
+	for _, leg := range legs {
+		if leg.store == nil || !storeref.IsClassRef(leg.ref) {
+			return nil
+		}
+		if binding != nil && leg.store != binding {
+			return nil
+		}
+		binding = leg.store
+	}
+	return binding
+}
+
+// ownScaleCheckTarget picks the store a pool's default demand probe reads.
+//
+// It is its own scope's ledger — except for a store-scoped control dispatcher
+// on a city converged onto a class binding, where every scope's control rows
+// live in the binding and the rig work ledger the dispatcher is named after
+// holds none of them. There the target is the binding under the CITY store key,
+// byte-for-byte the target the city's own dispatcher already gets: the binding
+// is a city-scope store serving every scope, demand keys normalize class refs
+// onto "city" anyway (normalizeDemandStoreRef), and one store key means one
+// store group, listed once per tick for every dispatcher template — rows are
+// attributed to templates by route, not by store.
+//
+// This does not widen anyone's probe. A dispatcher still reads exactly one
+// store; it is just the one its rows live in.
+func ownScaleCheckTarget(
+	cityPath string,
+	cfg *config.City,
+	agentCfg *config.Agent,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	controlBinding beads.Store,
+	storeScopedControlDispatcher bool,
+) defaultScaleCheckTarget {
+	if storeScopedControlDispatcher && controlBinding != nil {
+		return defaultScaleCheckTarget{
+			template: agentCfg.QualifiedName(),
+			storeKey: "city",
+			store:    controlBinding,
+		}
+	}
+	return defaultScaleCheckTargetForAgent(cityPath, cfg, agentCfg, cityStore, rigStores)
+}
+
+// defaultScaleCheckTargetForAgent points a pool at its own scope's ledger: the
+// rig store for a Dir-scoped agent, the city store otherwise. A control
+// dispatcher on a split city is the documented exception — see
+// ownScaleCheckTarget, which is what the agent loop calls.
 func defaultScaleCheckTargetForAgent(
 	cityPath string,
 	cfg *config.City,
@@ -5383,9 +5466,40 @@ func normalizeDemandStoreRef(storeRef string) string {
 // through the city candidate and rig-owned rows only through their named rig.
 // Legacy rows without a canonical ref remain visible through every independent
 // store so same-ID beads in genuinely separate stores are not collapsed.
+//
+// A class-binding candidate is a special case of "authoritative", not an
+// exception to it. The duplicate-view risk this filter exists for is legacy
+// unscoped file-store mode, where two DIFFERENT store handles alias the same
+// physical file; a relocated class binding is never that — it is a distinct
+// physical store `gc storage migrate` moves rows INTO, and `gc storage status`
+// proves it converged. Admitting it here is safe because of this filter's ONE
+// call site: collectOpenUnassignedRoutedWork resolves its legs through
+// routedWorkStoreCandidates, which plans on the RUNTIME plane, and Narrow
+// (internal/storeref/relevance.go) drops every leg but the binding once a plan
+// touches one — so the binding is the only leg that will ever offer the row and
+// there is no second candidate to defer to.
+//
+// That is a property of the CALL SITE, not of the stores. `gc storage migrate`
+// never mutates the source (infra_class_migrate.go, "Retained source": the work
+// store keeps its infrastructure rows verbatim), so a reconcile-plane leg set —
+// which is not narrowed — would offer a relocated row through BOTH the binding
+// and the retained legacy leg, and this caller's seen key ({StoreRef, ID}) does
+// not dedupe across differing refs. Do not extend this carve-out to a
+// reconcile-plane caller without solving that first.
+//
+// Gating it on rootRig the way a legacy-store candidate is gated would
+// silently drop every rig-logical row a migration relocated into the binding —
+// the row is real, open, routed, and permanently invisible to demand and route
+// repair. The binding's OWN ref reads as city scope
+// (storeref.ScopeRigContext) because it belongs to no rig; that says where a
+// row lives, not who owns it, which is why the route repair downstream
+// (repairBead) takes the owner from the row's gc.root_store_ref.
 func rootStoreRefMatchesCandidate(rootStoreRef, candidateStoreRef string) bool {
 	rootRig, rootScoped := storeref.ScopeRigContext(rootStoreRef)
 	if !rootScoped {
+		return true
+	}
+	if storeref.IsClassRef(candidateStoreRef) {
 		return true
 	}
 	candidateRig, candidateScoped := storeref.ScopeRigContext(candidateStoreRef)
@@ -5640,16 +5754,21 @@ func controlDispatcherRouteRepairCursorForDomain(repairDomain string) *atomic.Ui
 }
 
 // repairControlDispatcherRoutesForStoreScope durably repairs open control work
-// whose persisted route names a dispatcher in a different store scope. Older
-// builds could stamp a city route on a rig-resident graph; rewriting the route
-// before demand evaluation lets the matching rig dispatcher start and claim it
-// without teaching claimers to reinterpret dishonest route metadata. Writes are
-// bounded per city pass so a large upgrade backlog cannot monopolize a
-// reconciler tick. Each city owns its rotating start offset, preventing either
-// a persistently bad row or another CityRuntime in the same supervisor from
-// starving later scopes. Deferred or failed cross-scope route repairs are
-// suppressed from this tick's demand snapshot and retried on later ticks;
-// marker-only cleanup leaves an already-canonical route eligible for demand.
+// whose persisted route names a dispatcher in a scope other than the one the
+// row's canonical gc.root_store_ref belongs to. Older builds could stamp a city
+// route on a rig-owned graph; rewriting the route before demand evaluation lets
+// the matching rig dispatcher start and claim it without teaching claimers to
+// reinterpret dishonest route metadata. The row's root ref, not the store leg
+// it was collected through, names the owner: through a legacy file store the
+// two agree (rootStoreRefMatchesCandidate admits nothing else), and through a
+// relocated class binding — which serves every scope's rows and belongs to
+// none — the root ref is the only ownership evidence left. Writes are bounded
+// per city pass so a large upgrade backlog cannot monopolize a reconciler tick.
+// Each city owns its rotating start offset, preventing either a persistently
+// bad row or another CityRuntime in the same supervisor from starving later
+// scopes. Deferred or failed cross-scope route repairs are suppressed from this
+// tick's demand snapshot and retried on later ticks; marker-only cleanup leaves
+// an already-canonical route eligible for demand.
 func repairControlDispatcherRoutesForStoreScope(
 	repairDomain string,
 	cfg *config.City,
@@ -5677,8 +5796,8 @@ func repairControlDispatcherRoutesForStoreScope(
 	}
 }
 
-// controlDispatcherRouteLookup memoizes whether a store scope has a configured
-// control-dispatcher and, if so, its qualified route.
+// controlDispatcherRouteLookup memoizes whether a scope (the city, or one rig)
+// has a configured control-dispatcher and, if so, its qualified route.
 type controlDispatcherRouteLookup struct {
 	route string
 	ok    bool
@@ -5686,7 +5805,7 @@ type controlDispatcherRouteLookup struct {
 
 // controlDispatcherRouteRepair carries the per-pass state for a bounded
 // cross-scope control-route repair sweep: per-scope route lookups are cached, a
-// store scope with no configured dispatcher is reported once, and the remaining
+// scope with no configured dispatcher is reported once, and the remaining
 // durable-write budget is tracked so a large upgrade backlog cannot monopolize a
 // reconciler tick.
 type controlDispatcherRouteRepair struct {
@@ -5708,21 +5827,27 @@ func newControlDispatcherRouteRepair(cfg *config.City, stderr io.Writer) *contro
 }
 
 // repairBead realigns one control bead's persisted route with the dispatcher
-// that owns its store scope, clearing any stale fallback marker in the same
-// bounded write. Non-control, unscoped, and already-canonical beads are left
-// untouched. Store ownership, not the current route, selects the dispatcher: an
-// unscoped row cannot be repaired safely because #3765 itself stamped a valid
-// city route onto rig-owned controls, so gc.routed_to is not ownership evidence.
-// Graph v2 stamped gc.root_store_ref before that regression, so malformed/older
-// rows are left untouched instead of guessing a store.
+// that owns the scope its gc.root_store_ref names, clearing any stale fallback
+// marker in the same bounded write. Non-control, unscoped, and
+// already-canonical beads are left untouched. Ownership, not the current route,
+// selects the dispatcher: an unscoped row cannot be repaired safely because
+// #3765 itself stamped a valid city route onto rig-owned controls, so
+// gc.routed_to is not ownership evidence. Graph v2 stamped gc.root_store_ref
+// before that regression, so malformed/older rows are left untouched instead of
+// guessing a store. The physical leg is not ownership evidence either once a
+// class binding exists: the binding reads as city scope because it belongs to
+// no rig, yet it serves every rig's relocated control rows, and routing those
+// to the city dispatcher would strip the rig dispatchers that have always run
+// them and park the rows on a dispatcher the city may have suspended.
 func (r *controlDispatcherRouteRepair) repairBead(bead *beads.Bead, store beads.Store, storeRef string) {
 	if !beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) {
 		return
 	}
-	if _, scoped := storeref.ScopeRigContext(bead.Metadata[beadmeta.RootStoreRefMetadataKey]); !scoped {
+	rigContext, scoped := storeref.ScopeRigContext(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
+	if !scoped {
 		return
 	}
-	route, ok := r.desiredRoute(bead, storeRef)
+	route, ok := r.desiredRoute(bead, storeRef, rigContext)
 	if !ok {
 		return
 	}
@@ -5735,14 +5860,15 @@ func (r *controlDispatcherRouteRepair) repairBead(bead *beads.Bead, store beads.
 	r.persist(bead, store, current, route, needsRouteRepair, clearFallback)
 }
 
-// desiredRoute returns the configured control-dispatcher route for the bead's
-// store scope, caching lookups per rig context. When no dispatcher is
-// configured it reports the gap once per scope and suppresses the bead's
-// cross-scope route from this tick's demand snapshot so it cannot create phantom
-// demand for a dispatcher that cannot read the store; the durable route is left
-// in place for operator diagnosis and a later config repair.
-func (r *controlDispatcherRouteRepair) desiredRoute(bead *beads.Bead, storeRef string) (string, bool) {
-	rigContext := controlDispatcherRigContextForStoreRef(storeRef)
+// desiredRoute returns the configured control-dispatcher route for the scope
+// that owns the bead — "" for the city, else the rig its gc.root_store_ref
+// names — caching lookups per rig context. When no dispatcher is configured it
+// reports the gap once per scope and suppresses the bead's cross-scope route
+// from this tick's demand snapshot so it cannot create phantom demand for a
+// dispatcher that cannot read the store; the durable route is left in place for
+// operator diagnosis and a later config repair. storeRef is the leg the row was
+// collected through and is used only to name it in that diagnostic.
+func (r *controlDispatcherRouteRepair) desiredRoute(bead *beads.Bead, storeRef, rigContext string) (string, bool) {
 	lookup, cached := r.routeByScope[rigContext]
 	if !cached {
 		lookup.route, lookup.ok = configuredControlDispatcherRouteForScope(r.cfg, rigContext)
@@ -5753,7 +5879,7 @@ func (r *controlDispatcherRouteRepair) desiredRoute(bead *beads.Bead, storeRef s
 	}
 	if !r.reportedMissingScope[rigContext] {
 		if r.stderr != nil {
-			fmt.Fprintf(r.stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s in %s has no configured control-dispatcher for its store scope\n", bead.ID, controlDispatcherStoreRefLabel(storeRef)) //nolint:errcheck
+			fmt.Fprintf(r.stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s in %s has no configured control-dispatcher for its scope\n", bead.ID, controlDispatcherRowScopeLabel(storeRef, rigContext)) //nolint:errcheck
 		}
 		r.reportedMissingScope[rigContext] = true
 	}
@@ -5839,20 +5965,23 @@ func configuredControlDispatcherRouteForScope(cfg *config.City, rigContext strin
 	return "", false
 }
 
-func controlDispatcherRigContextForStoreRef(storeRef string) string {
-	storeRef = strings.TrimSpace(storeRef)
-	if storeRef == "" || storeRef == "city" || strings.HasPrefix(storeRef, "city:") {
-		return ""
+// controlDispatcherRowScopeLabel names, for the missing-dispatcher diagnostic,
+// the leg a control row was collected through and the scope that owns it. A
+// class binding is named as itself with its owner alongside, because the
+// binding holds rows of every scope and the owner is what the operator has to
+// configure a dispatcher for.
+func controlDispatcherRowScopeLabel(storeRef, rigContext string) string {
+	owner := "the city"
+	if rigContext != "" {
+		owner = fmt.Sprintf("rig %q", rigContext)
 	}
-	return strings.TrimPrefix(storeRef, "rig:")
-}
-
-func controlDispatcherStoreRefLabel(storeRef string) string {
-	storeRef = strings.TrimSpace(storeRef)
-	if storeRef == "" || storeRef == "city" || strings.HasPrefix(storeRef, "city:") {
+	if storeref.IsClassRef(storeRef) {
+		return fmt.Sprintf("class binding %q serving %s", strings.TrimSpace(storeRef), owner)
+	}
+	if rigContext == "" {
 		return "the city store"
 	}
-	return fmt.Sprintf("rig store %q", controlDispatcherRigContextForStoreRef(storeRef))
+	return fmt.Sprintf("rig store %q", rigContext)
 }
 
 func selectOrCreateDependencyPoolSessionBead(
