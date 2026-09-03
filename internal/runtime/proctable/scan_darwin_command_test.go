@@ -1,6 +1,9 @@
 package proctable
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDarwinPSCommandIgnoresInlineTmuxEnv(t *testing.T) {
 	fields := []string{
@@ -39,5 +42,24 @@ func TestIsInfrastructureCommandMatchesExactNamesOnly(t *testing.T) {
 		if isInfrastructureCommand(command) {
 			t.Errorf("isInfrastructureCommand(%q) = true, want false: only an exact tmux name is infrastructure", command)
 		}
+	}
+}
+
+// The exact-name match must hold for values the real parser produces, not just
+// for pre-split fixtures: psRecords tokenizes the ps line with strings.Fields,
+// so a proctitle'd "tmux: server" reaches isInfrastructureCommand as "tmux:".
+func TestIsInfrastructureCommandThroughRealPSTokenization(t *testing.T) {
+	infra := []string{
+		"  100     1 tmux: server",
+		"  101     1 /opt/homebrew/bin/tmux -L hq new-session -d",
+	}
+	for _, line := range infra {
+		if !isInfrastructureCommand(darwinPSCommand(strings.Fields(line))) {
+			t.Errorf("ps line %q was not classified as infrastructure", line)
+		}
+	}
+	agent := "  102     1 /usr/local/bin/tmux-wrapper --serve GC_SESSION_ID=hq-session"
+	if isInfrastructureCommand(darwinPSCommand(strings.Fields(agent))) {
+		t.Errorf("ps line %q was classified as infrastructure; a tmux-* wrapper is a candidate agent root", agent)
 	}
 }

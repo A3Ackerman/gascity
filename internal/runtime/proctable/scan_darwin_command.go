@@ -22,7 +22,11 @@ func darwinPSCommand(fields []string) string {
 // hides is a runtime the orphan sweep can never reap.
 func isInfrastructureCommand(command string) bool {
 	switch filepath.Base(strings.TrimSpace(command)) {
-	case "tmux", "tmux: server", "tmux: client":
+	// "tmux:" is the whole story on Darwin: psRecords splits the ps line with
+	// strings.Fields, so a proctitle'd "tmux: server" reaches here as its first
+	// token alone. Nothing legitimately runs as an executable named "tmux:", so
+	// this costs none of the false-positive narrowing the exact match bought.
+	case "tmux", "tmux:", "tmux: server", "tmux: client":
 		return true
 	}
 	return false

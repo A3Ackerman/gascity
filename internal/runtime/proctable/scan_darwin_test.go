@@ -8,6 +8,10 @@ import "testing"
 // session's GC_SESSION_ID and reparents to launchd. The parent-envelope test
 // alone therefore reports it as an agent root, and the orphan sweep kills the
 // one server every agent in the city shares (gastownhall/gascity#5392).
+//
+// psRecord.command is the first whitespace token of ps's command column, so a
+// real "tmux: server" proctitle reaches these tests as "tmux:"; both spellings
+// are infrastructure, and fixtures below should stay honest about that.
 func TestScanRecordsBySessionIDNeverReportsInfrastructureAsRoot(t *testing.T) {
 	records := map[int]psRecord{
 		100: {pid: 100, ppid: 1, command: "tmux: server", env: map[string]string{"GC_SESSION_ID": "hq-session"}},
