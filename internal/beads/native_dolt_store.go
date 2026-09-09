@@ -1731,6 +1731,13 @@ func retryOnNativeDoltSerializationConflict(attempt func() error) error {
 }
 
 // SetMetadataBatch sets multiple metadata keys on a bead.
+//
+// The merge is a read-modify-write of the whole metadata map, so it runs
+// inside one transaction: an update that commits between the read and the
+// write then surfaces as a serialization conflict the retry re-reads through,
+// instead of being replaced by the stale map. Outside a transaction the
+// write-back cannot see that anything changed and silently undoes the other
+// writer's keys — a fence activation was lost that way to a one-key stamp.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	storage, release, err := s.acquireStorage()
 	if err != nil {
@@ -1741,36 +1748,10 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	return retryOnNativeDoltSerializationConflict(func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
-		return s.setMetadataBatchOnce(ctx, storage, id, kvs)
+		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: set metadata on bead %s", id), func(tx beadslib.Transaction) error {
+			return s.applySetMetadataBatchInTx(ctx, tx, id, kvs)
+		})
 	})
-}
-
-// setMetadataBatchOnce performs one complete metadata read-merge-write attempt.
-// A retry must call this whole operation again so metadata committed by the
-// competing transaction is included rather than overwritten from a stale read.
-func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string) error {
-	issue, err := storage.GetIssue(ctx, id)
-	if err != nil {
-		return nativeStoreError(id, err)
-	}
-	if issue == nil {
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
-	}
-	metadata, err := metadataMapFromNative(issue.Metadata)
-	if err != nil {
-		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
-	}
-	if metadata == nil {
-		metadata = make(map[string]string, len(kvs))
-	}
-	for k, v := range kvs {
-		metadata[k] = v
-	}
-	raw, err := metadataRawFromMap(metadata)
-	if err != nil {
-		return err
-	}
-	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
 }
 
 // isNativeDoltSerializationConflict reports only Dolt/MySQL transaction
