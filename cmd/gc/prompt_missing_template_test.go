@@ -25,7 +25,7 @@ import (
 func TestRenderPrompt_DeclaredButMissingTemplateWarnsToStderr(t *testing.T) {
 	cityPath := t.TempDir()
 	// The agent name is deliberately not a substring of the template path, so
-	// the log line below reports honestly whether a fix named the agent.
+	// the agent-name assertion below cannot pass by accident.
 	const templatePath = "prompts/crew.template.md"
 	ctx := PromptContext{CityRoot: cityPath, AgentName: "qcore/navani", TemplateName: "crew"}
 
@@ -44,10 +44,9 @@ func TestRenderPrompt_DeclaredButMissingTemplateWarnsToStderr(t *testing.T) {
 		if !strings.Contains(stderr.String(), templatePath) {
 			t.Errorf("stderr = %q, want a line naming the missing template path %q", stderr.String(), templatePath)
 		}
-		// The parse-error branches name only the path and the error; a fix
-		// mirroring them is enough. The agent name is available as
-		// PromptContext.AgentName, so record whether it was used.
-		t.Logf("stderr names the agent %q: %v", ctx.AgentName, strings.Contains(stderr.String(), ctx.AgentName))
+		if !strings.Contains(stderr.String(), ctx.AgentName) {
+			t.Errorf("stderr = %q, want a line naming the agent %q (PromptContext.AgentName is available to the renderer)", stderr.String(), ctx.AgentName)
+		}
 	})
 
 	t.Run("control: no prompt_template declared", func(t *testing.T) {
