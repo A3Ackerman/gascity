@@ -4381,9 +4381,12 @@ func selectOrPlanPoolSessionBead(
 		info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, canonical)
 		return info, slot, nil, err
 	}
-	// Reuse an existing active/creating session bead. Skip drained, closed,
-	// and asleep — asleep ephemerals are not restarted; a fresh session is
-	// created instead. The reconciler closes orphaned asleep beads.
+	// Reuse an existing active/creating session bead. Skip drained and
+	// closed. Asleep is skipped too, with one carve-out: a
+	// lifecycle=one_shot session whose sleep reason is freeable and which
+	// holds no assigned work is reused through the wake path — see
+	// reusablePoolSessionInfo. Nothing in the reconciler closes orphaned
+	// asleep beads; an earlier version of this comment claimed it did.
 	for _, candidate := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
 			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, candidate, usedSlots)
@@ -4904,6 +4907,41 @@ func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) b
 			return true
 		}
 		if namedIdentity := strings.TrimSpace(info.ConfiguredNamedIdentity); namedIdentity != "" && assignee == namedIdentity {
+			return true
+		}
+	}
+	return false
+}
+
+// sessionBeadHasAssignedWorkByAnyIdentityInfo is the broader sibling of
+// sessionBeadHasAssignedWorkInfo: it matches an open/in-progress work bead's
+// Assignee against every current identity of the session (ID,
+// SessionNameMetadata, ConfiguredNamedIdentity, Alias, AliasHistory — see
+// session.AssigneeIdentities), not just the narrower ID/SessionNameMetadata/
+// ConfiguredNamedIdentity trio sessionBeadHasAssignedWorkInfo pins. Work
+// claimed by an agent is commonly assigned under its actor alias (GC_ALIAS /
+// BEADS_ACTOR, see session.AssigneeIdentifier), which the narrower check
+// does not consider, so it can miss live assigned work entirely.
+//
+// It exists as a separate function (not a change to the pinned
+// sessionBeadHasAssignedWorkInfo) so its wider match is opt-in for callers
+// that need it — currently only the one_shot asleep-freeable wake-reuse
+// guard in reusablePoolSessionInfo, where under-detecting assigned work lets
+// the ordinary wake path "reuse" an identity that still holds an unfinished
+// step, orphaning it a tick later with the step pinned in_progress forever.
+func sessionBeadHasAssignedWorkByAnyIdentityInfo(workBeads []beads.Bead, info session.Info) bool {
+	identities := make(map[string]bool, 5)
+	for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+		if id = strings.TrimSpace(id); id != "" {
+			identities[id] = true
+		}
+	}
+	for _, wb := range workBeads {
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
+			continue
+		}
+		if identities[assignee] {
 			return true
 		}
 	}
