@@ -394,6 +394,11 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 		updated = cloneBead(fresh)
 		notify = true
 	} else if b, ok := c.beads[id]; ok {
+		// The refresh read failed, so this row is the caller's intent, not
+		// verified backing truth. Fold it so readers see the write, but keep
+		// the dirty fence so the idempotence short-circuit cannot later treat
+		// the guess as proof the backing holds these values — the same
+		// treatment Update gives its own failed refresh.
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string)
 		}
@@ -401,8 +406,9 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
 			depsMode:   depsKeepCached,
 			seqMode:    seqKeep,
-			clearDirty: true,
+			clearDirty: false,
 		})
+		c.markDirtyLocked(id)
 		updated = cloneBead(b)
 		notify = true
 	} else {
@@ -456,6 +462,9 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 		updated = cloneBead(fresh)
 		notify = true
 	} else if b, ok := c.beads[id]; ok {
+		// Unverified fold: see SetMetadata. The dirty fence is what stops
+		// metadataAlreadyMatchesCached from reporting a no-op against a row
+		// the backing was never re-read for.
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string, len(kvs))
 		}
@@ -465,8 +474,9 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
 			depsMode:   depsKeepCached,
 			seqMode:    seqKeep,
-			clearDirty: true,
+			clearDirty: false,
 		})
+		c.markDirtyLocked(id)
 		updated = cloneBead(b)
 		notify = true
 	} else {
