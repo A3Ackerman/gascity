@@ -4881,6 +4881,52 @@ func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t
 	}
 }
 
+// TestRecoverRunningPendingCreate_ReportsIncompleteWhenTheCommitDidNotPersist
+// holds the crash-recovery sibling of the start commit to its own documented
+// contract: it returns true "when the heal was persisted". A store whose write
+// returns nil without landing leaves the claim set, and reporting the repair
+// complete there strands exactly the row the recovery exists to unstick — the
+// claim shields it from both sweeps and no later tick revisits it. Incomplete is
+// the honest answer, and the caller already logs it and retries next tick.
+func TestRecoverRunningPendingCreate_ReportsIncompleteWhenTheCommitDidNotPersist(t *testing.T) {
+	store := &swallowOneMetadataBatchStore{MemStore: beads.NewMemStore(), swallow: commitStartedBatch}
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "sky",
+			"pending_create_claim": "true",
+			"state":                "active",
+			"state_reason":         "creation_complete",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
+
+	ok, _ := recoverRunningPendingCreate(
+		sessiontest.SeedBead(t, bead), tp, cfg, store,
+		&clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}, nil,
+	)
+
+	if !store.swallowed {
+		t.Fatal("the commit batch was never offered to the store — the fixture no longer models the lost write")
+	}
+	persisted, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q — the commit batch landed after all, the fixture no longer models the lost write", persisted.Metadata["pending_create_claim"])
+	}
+	if ok {
+		t.Error("recoverRunningPendingCreate returned true while the bead still holds pending_create_claim=true; the repair is incomplete and must be retried")
+	}
+}
+
 // TestRecoverRunningPendingCreate_StampsPrimingPairWhenDelivered pins the B2
 // write-only stamp (S19 Stage 2): the crash-recovery re-confirmation of an
 // already-running runtime stamps the primed_at/prompt_hash confirmation pair
@@ -5040,6 +5086,170 @@ func TestCommitStartResult_AtomicBatchLandsStateAndClaimClearTogether(t *testing
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared atomically with state transition", got.Metadata["pending_create_claim"])
 	}
+}
+
+// swallowOneMetadataBatchStore models the lost-write shape a live city hit: one
+// SetMetadataBatch reports success and writes nothing. A backing store that
+// returns nil for a write it never landed is indistinguishable from a real
+// commit at the call site, which is exactly why a lifecycle commit has to verify
+// the row rather than trust the write.
+type swallowOneMetadataBatchStore struct {
+	*beads.MemStore
+	mu        sync.Mutex
+	swallow   func(kvs map[string]string) bool
+	swallowed bool
+}
+
+func (s *swallowOneMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.mu.Lock()
+	if s.swallow != nil && !s.swallowed && s.swallow(kvs) {
+		s.swallowed = true
+		s.mu.Unlock()
+		return nil
+	}
+	s.mu.Unlock()
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+// Tx overrides the promoted *beads.MemStore.Tx so callbacks observe the swallow.
+// Without this override the embedded MemStore.Tx passes the raw *MemStore (not
+// s) into fn, bypassing the swallow for any write routed through store.Tx.
+func (s *swallowOneMetadataBatchStore) Tx(_ string, fn func(beads.Tx) error) error {
+	return fn(s)
+}
+
+// startPoolSeatThroughRealPipeline runs one pool-shaped session bead
+// (start-pending, claim held, generation 1) through the REAL start pipeline:
+// executePlannedStarts drives prepareStartCandidateForCity -> buildPreparedStart
+// -> startPreparedStartCandidate -> commitStartResultTraced against the fake
+// runtime provider and the given store. It returns the reported wake count, the
+// persisted row, and the reconciler's stderr.
+func startPoolSeatThroughRealPipeline(t *testing.T, store beads.Store, sp *runtime.Fake) (int, beads.Bead, string) {
+	t.Helper()
+	const seatName = "pool-seat"
+	bead, err := store.Create(beads.Bead{
+		ID:     "s-pool-seat",
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         seatName,
+			"state":                "start-pending",
+			"pending_create_claim": "true",
+			"generation":           "1",
+			"instance_token":       "create-time-token",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp := TemplateParams{Command: "true", SessionName: seatName, TemplateName: "helper"}
+	candidates := []startCandidate{{info: sessiontest.SeedBead(t, bead), tp: tp}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper", MaxActiveSessions: intPtr(1)}}}
+	var stderr bytes.Buffer
+	woken := executePlannedStarts(
+		context.Background(),
+		candidates,
+		cfg,
+		map[string]TemplateParams{seatName: tp},
+		sp,
+		store,
+		"",
+		&clock.Fake{Time: time.Date(2026, 9, 13, 10, 42, 46, 0, time.UTC)},
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		&stderr,
+	)
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return woken, got, stderr.String()
+}
+
+// commitStartedBatch reports whether a metadata batch is the start commit's
+// CommitStartedPatch. creation_complete_at is stamped by that patch alone on
+// this path, so it identifies the batch without matching the pre-wake patch or
+// any of the launch-time stamps.
+func commitStartedBatch(kvs map[string]string) bool {
+	_, ok := kvs["creation_complete_at"]
+	return ok
+}
+
+// TestControllerStartPersistsIncarnationIdentityToTheBead pins the start
+// pipeline's durability contract at the seam where a live city lost it: the
+// controller may report a seat woken only when the row it just wrote actually
+// holds the transition.
+//
+// The control arm states the invariant a healthy start satisfies — the launch
+// environment the provider was handed and the persisted bead agree on the
+// incarnation identity (GC_INSTANCE_TOKEN/instance_token, GC_RUNTIME_EPOCH/
+// generation), the row left start-pending for active, and the create claim is
+// cleared with a creation_complete_at marker.
+//
+// The swallow arm is the regression. With the commit batch reporting success and
+// writing nothing, today's commit trusts the nil error and reports the start
+// woken while the bead still holds the create claim. Nothing ever revisits that
+// row: the controller counts the seat as live capacity forever and every hook
+// claim inside it drains as a stale session. A commit whose keys did not land
+// must be reported as failed so the reconciler retries on the next tick.
+func TestControllerStartPersistsIncarnationIdentityToTheBead(t *testing.T) {
+	t.Run("committed start persists the incarnation the runtime was launched with", func(t *testing.T) {
+		store := &swallowOneMetadataBatchStore{MemStore: beads.NewMemStore()}
+		sp := runtime.NewFake()
+
+		woken, got, _ := startPoolSeatThroughRealPipeline(t, store, sp)
+
+		if woken != 1 {
+			t.Fatalf("woken = %d, want 1 for a start whose commit persisted", woken)
+		}
+		launched := sp.LastStartConfig("pool-seat")
+		if launched == nil {
+			t.Fatal("provider was never started")
+		}
+		if launched.Env["GC_INSTANCE_TOKEN"] != got.Metadata["instance_token"] {
+			t.Errorf("launch env GC_INSTANCE_TOKEN = %q, bead instance_token = %q — the runtime is fencing on an identity the ledger does not hold",
+				launched.Env["GC_INSTANCE_TOKEN"], got.Metadata["instance_token"])
+		}
+		if launched.Env["GC_RUNTIME_EPOCH"] != got.Metadata["generation"] {
+			t.Errorf("launch env GC_RUNTIME_EPOCH = %q, bead generation = %q — the runtime is a later incarnation than the ledger records",
+				launched.Env["GC_RUNTIME_EPOCH"], got.Metadata["generation"])
+		}
+		if got.Metadata["state"] != "active" {
+			t.Errorf("state = %q, want active", got.Metadata["state"])
+		}
+		if got.Metadata["pending_create_claim"] != "" {
+			t.Errorf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+		}
+		if got.Metadata["creation_complete_at"] == "" {
+			t.Error("creation_complete_at empty — the post-create sweep guard has no window to key on")
+		}
+	})
+
+	t.Run("a start whose commit did not persist is not reported woken", func(t *testing.T) {
+		store := &swallowOneMetadataBatchStore{MemStore: beads.NewMemStore(), swallow: commitStartedBatch}
+		sp := runtime.NewFake()
+
+		woken, got, stderr := startPoolSeatThroughRealPipeline(t, store, sp)
+
+		if !store.swallowed {
+			t.Fatal("the commit batch was never offered to the store — the fixture no longer models the lost write")
+		}
+		if got.Metadata["state"] == "active" || got.Metadata["pending_create_claim"] == "" {
+			t.Fatalf("the commit batch landed after all (state=%q pending_create_claim=%q) — the fixture no longer models the lost write",
+				got.Metadata["state"], got.Metadata["pending_create_claim"])
+		}
+		if woken != 0 {
+			t.Errorf("woken = %d, want 0: the bead still holds state=%q pending_create_claim=%q, so the seat is not live and the start must be retried",
+				woken, got.Metadata["state"], got.Metadata["pending_create_claim"])
+		}
+		if !strings.Contains(stderr, "pool-seat") ||
+			!strings.Contains(stderr, "state") ||
+			!strings.Contains(stderr, "pending_create_claim") {
+			t.Errorf("stderr = %q, want the session name and the unpersisted keys named", stderr)
+		}
+	})
 }
 
 func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testing.T) {

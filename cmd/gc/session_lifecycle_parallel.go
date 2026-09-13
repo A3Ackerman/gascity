@@ -2324,6 +2324,36 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
+	// A store write that returns nil without landing is not hypothetical: a
+	// caching layer can short-circuit a batch it believes is already applied,
+	// and the commit then reports a seat live whose row never left
+	// start-pending with its create claim still held. Nothing revisits that
+	// row — the claim shields it from both sweeps, the controller keeps
+	// counting the seat as live capacity, and every hook claim inside it
+	// drains as a stale session. So the keys that gate that wedge are read
+	// back once and the start is reported as failed when they did not move,
+	// which hands it to the next tick's retry instead of to a silent wedge.
+	// The read is skipped when the patch set neither key (an already-awake
+	// restart transitions nothing), so the cost is one read per STARTED
+	// session — bounded by the per-tick wake budget, not by the patch count.
+	if unpersisted, verifyErr := unpersistedStartCommitKeys(sessFront, info.ID, metadata); verifyErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: verifying start commit for %s: %v\n", name, verifyErr) //nolint:errcheck
+	} else if len(unpersisted) > 0 {
+		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		keys := strings.Join(unpersisted, ", ")
+		err := fmt.Errorf("start commit for session %q (bead %s) reported success but %s did not persist", name, info.ID, keys)
+		fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck
+		if trace != nil {
+			trace.RecordMutation(TraceSiteMutationBeadMetadata, TraceReasonUnknown, TraceOutcomeFailed, "metadata_batch", info.ID, keys, traceRecordPayload{
+				"wave":     wave,
+				"error":    err.Error(),
+				"template": tp.TemplateName,
+				"field":    keys,
+			})
+		}
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_not_persisted", result.started, result.finished, err, result.phases)
+		return false
+	}
 	// A successful, durably-committed start clears any accrued startup-health
 	// episode for this session name (ga-o04bfr.1.1). Skipped when there is
 	// nothing to clear so a healthy session's first-ever start does not mint
@@ -2365,6 +2395,52 @@ func commitStartResultTraced(
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, nil, result.phases)
 	return true
+}
+
+// startCommitVerifiedKeys are the CommitStartedPatch keys whose silent loss
+// wedges a session permanently: "state" carries the transition out of
+// start-pending, and "pending_create_claim" carries the create claim that
+// shields the row from both sweeps. The rest of the patch is hashes and markers
+// that a later tick restamps on its own.
+var startCommitVerifiedKeys = []string{"state", "pending_create_claim"}
+
+// unpersistedStartCommitKeys re-reads the session bead through the front door's
+// persisted read and returns, in startCommitVerifiedKeys order, the keys this
+// patch set that the row does not hold. It is the commit's proof that a store
+// write which returned nil actually landed.
+//
+// A patch that sets neither key needs no proof and costs no read. A read error
+// is returned rather than treated as a lost write: the write itself reported
+// success, so a failed verification read says nothing about the row, and
+// failing the commit on it would churn a seat that started fine.
+func unpersistedStartCommitKeys(sessFront *sessionpkg.Store, id string, patch sessionpkg.MetadataPatch) ([]string, error) {
+	if sessFront == nil || strings.TrimSpace(id) == "" {
+		return nil, nil
+	}
+	want := make(map[string]string, len(startCommitVerifiedKeys))
+	for _, key := range startCommitVerifiedKeys {
+		if value, ok := patch[key]; ok {
+			want[key] = value
+		}
+	}
+	if len(want) == 0 {
+		return nil, nil
+	}
+	_, persisted, err := sessFront.GetPersistedResponse(id)
+	if err != nil {
+		return nil, err
+	}
+	var unpersisted []string
+	for _, key := range startCommitVerifiedKeys {
+		value, ok := want[key]
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(persisted.Metadata[key]) != strings.TrimSpace(value) {
+			unpersisted = append(unpersisted, key)
+		}
+	}
+	return unpersisted, nil
 }
 
 // commitStartFailure performs the failure-path side effects for a start that
@@ -2499,9 +2575,12 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 
 // recoverRunningPendingCreate heals an already-active bead whose
 // pending_create_claim flag was left set after a partial write on a prior tick.
-// Returns (true, metadata) when the heal was persisted, (false, nil) on any
-// early-out or failure. The caller folds the returned metadata onto the typed
-// snapshot via ApplyPatch (nil is a no-op).
+// Returns (true, metadata) when the heal was persisted — verified against the
+// row, not inferred from a nil write error — and (false, residue) on an
+// early-out, or on a heal that failed or did not land, where residue is
+// whatever start-prep metadata was already written (nil when there is none).
+// The caller folds the returned metadata onto the typed snapshot via ApplyPatch
+// (nil is a no-op).
 func recoverRunningPendingCreate(
 	info sessionpkg.Info,
 	tp TemplateParams,
@@ -2594,6 +2673,26 @@ func recoverRunningPendingCreate(
 		}
 		// buildPreparedStart succeeded, so its folds (stale-resume clear + instance_token
 		// mint) are on prepared.candidate.info — fold the residue from there.
+		return false, pendingCreateResidueFold(prepared.candidate.info)
+	}
+	// This function's contract is "true when the heal was persisted", so the
+	// same verification the start commit does applies here: a write that
+	// returned nil without landing leaves the claim set, and reporting the
+	// repair complete strands the very row this recovery exists to unstick.
+	// Unproven counts as undone here, unlike at the start commit, because this
+	// is a pure metadata repair on an already-running session — the caller logs
+	// it and repeats the repair next tick, with no runtime to churn — and the
+	// residue fold is the same one the write-failure arm above returns.
+	if unpersisted, verifyErr := unpersistedStartCommitKeys(sessionFrontDoor(store), info.ID, metadata); verifyErr != nil || len(unpersisted) > 0 {
+		if trace != nil {
+			detail := "did not persist " + strings.Join(unpersisted, ", ")
+			if verifyErr != nil {
+				detail = fmt.Sprintf("could not be verified: %v", verifyErr)
+			}
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateCommitFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
+				"error": fmt.Sprintf("pending-create commit for session %q (bead %s) %s", tp.SessionName, info.ID, detail),
+			})
+		}
 		return false, pendingCreateResidueFold(prepared.candidate.info)
 	}
 	// buildPreparedStart mints instance_token onto the twin + store (SetMarker) when
