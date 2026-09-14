@@ -998,6 +998,34 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 		// line that vanishes with the process.
 		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
 	})
+
+	// Same reasoning as above: a submit proven delivered but never observed
+	// busy (composer drained before the confirm budget saw it) must not fail
+	// the start either. It also gets the same durable artifact as the
+	// unconfirmed case above — the stderr warning alone vanishes with the
+	// process, and this case never retries (see adapter.go), so the artifact
+	// is the only trace left for a later observer.
+	t.Run("delivered-but-unobserved submit is not fatal", func(t *testing.T) {
+		ops := &fakeStartOps{
+			hasSessionResult:           true,
+			sendKeysErr:                fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, "test"),
+			recordUnconfirmedNudgePath: "/city/.gc/sessions/test/startup-nudge-unconfirmed.log",
+		}
+
+		cfg := runtime.Config{
+			Command: "claude",
+			Nudge:   "startup prompt",
+		}
+
+		if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
+			t.Fatalf("doStartSession = %v, want nil for a delivered-but-unobserved startup nudge", err)
+		}
+
+		// Exactly one attempt: unlike the unconfirmed case, this ladder never
+		// retries a delivered-but-unobserved submit (refs ga-civwyz).
+		callsByMethod(t, ops, "sendKeys", 1)
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
+	})
 }
 
 // TestSendStartupNudgeWithRetry_ConfirmsOnLaterAttempt is the fail-before/
@@ -1121,6 +1149,48 @@ func TestSendStartupNudgeWithRetry_NonRetryableErrorFailsFast(t *testing.T) {
 	}
 	if slept {
 		t.Error("should not sleep for a non-retryable error")
+	}
+}
+
+// TestSendStartupNudgeWithRetry_DeliveredButUnobservedNeverRetried proves the
+// ga-civwyz composition mayor flagged as the interaction to get right: a
+// submit already proven delivered (composer drained) but never observed busy
+// — arriving through the exact same send closure as ErrNudgeSubmitUnconfirmed
+// — must never be retried or re-pasted by the ladder. Retrying would
+// re-inject a message the session already received: the ga-civwyz
+// duplicate-reminder failure mode (up to 5 copies of one reminder, 1201
+// occurrences in 5 days of production logs). Unlike
+// NonRetryableErrorFailsFast's generic stand-in error, this uses the real
+// sentinel so a future change to the ladder's retry allowlist that
+// accidentally widens to include ErrNudgeSubmitDeliveredUnobserved fails
+// here first, not just at the doStartSession call-site level (see
+// TestDoStartSessionReturnsNudgeDeliveryError's "delivered-but-unobserved
+// submit is not fatal" case, which proves the caller's classification but
+// not the ladder's retry decision in isolation).
+func TestSendStartupNudgeWithRetry_DeliveredButUnobservedNeverRetried(t *testing.T) {
+	calls := 0
+	slept := false
+	busyCalls := 0
+	send := func() error {
+		calls++
+		return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, "test")
+	}
+	busy := func() (bool, error) {
+		busyCalls++
+		return false, nil
+	}
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) { slept = true }, busy)
+	if !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitDeliveredUnobserved", err)
+	}
+	if calls != 1 {
+		t.Fatalf("send calls = %d, want 1 (a delivered-but-unobserved submit must never be retried or re-pasted)", calls)
+	}
+	if slept {
+		t.Error("should not sleep for a delivered-but-unobserved submit")
+	}
+	if busyCalls != 0 {
+		t.Fatalf("busy calls = %d, want 0 (a proven-delivered submit fails fast before any busy check)", busyCalls)
 	}
 }
 

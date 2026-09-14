@@ -1524,9 +1524,15 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			// retry-capable caller beyond the bounded ladder just spent, so
 			// exhausting it is a warning, not a start failure: the session
 			// starts, but the agent may sit silently idle with the nudge
-			// still drafted in its input line rather than acted on. Any
+			// still drafted in its input line rather than acted on. A submit
+			// proven delivered but never observed busy
+			// (ErrNudgeSubmitDeliveredUnobserved) is the same warning-not-
+			// failure case for a different reason: the ladder above already
+			// refuses to retry it (retrying would re-inject a message the
+			// session already received), so by the time it reaches here
+			// delivery is proven and only the observation missed it. Any
 			// other error still fails the start.
-			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
 				return fmt.Errorf("sending startup nudge: %w", err)
 			}
 			// The stderr warning alone is not a durable record (Layer 0
