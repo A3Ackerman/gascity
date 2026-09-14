@@ -130,9 +130,16 @@ type Config struct {
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. Empty means use the default tmux server.
 	SocketName string
-	// RuntimeDir is the city runtime root (".gc/runtime") under which a
-	// per-session start-crash diagnostic is persisted. Empty disables the
-	// durable capture (e.g. ad-hoc invocations and tests run unchanged).
+	// RuntimeDir is the city runtime root under which per-session
+	// diagnostics are persisted. Production sets it to
+	// citylayout.RuntimePath(cityPath), which is "<city>/.gc" -- this doc
+	// said ".gc/runtime" and it was wrong, which is the same mistake gc
+	// doctor made when it went looking for these artifacts under
+	// .gc/runtime/sessions and found a permanently empty directory
+	// (dr-6siig HIGH 1). Resolve the subdirectory through
+	// citylayout.SessionDiagnosticsDirForRuntimeDir, never by joining a
+	// literal. Empty disables the durable capture, so ad-hoc invocations
+	// and tests run unchanged.
 	RuntimeDir string
 }
 
@@ -2374,6 +2381,17 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		return nil
 	}
 	// Fallback: best-effort single delivery (unchanged historical behavior).
+	// This family has no busy-state indicator AT ALL — confirmation is
+	// structurally impossible, not merely unobserved. Reporting every
+	// successful send as ErrNudgeSubmitUnconfirmed (the verified path's
+	// signal for "the submit MAY have failed, please retry") was tried and
+	// reverted here: this branch's callers (the queue drain in
+	// cmd/gc/cmd_nudge.go, mail-notify dedup) treat that error as a genuine
+	// delivery failure and re-enqueue/resend, so a family that can never
+	// confirm would have every successful nudge duplicated and eventually
+	// dead-lettered. Instead, keep reporting success on send and record a
+	// best-effort diagnostic (see recordUnconfirmedSubmit) so the gap is
+	// observable without corrupting the retry contract.
 	var lastErr error
 	for attempt := 0; attempt < submitEnterMaxSends; attempt++ {
 		if attempt > 0 {
@@ -2386,9 +2404,32 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		// 7. Wake again so the submitted turn is processed promptly.
 		wake()
 		delivered = true
+		t.recordUnconfirmedSubmit(session, message)
 		return nil
 	}
 	return fmt.Errorf("failed to send submit sequence after %d attempts: %w", submitEnterMaxSends, lastErr)
+}
+
+// recordUnconfirmedSubmit persists a best-effort diagnostic artifact when a
+// nudge submit was sent on a provider family with no busy-state indicator,
+// so delivery could not be confirmed (see the fallback branch of
+// NudgeSession above). This is deliberately separate from the retry/error
+// contract: the send is still reported as successful to the caller, since
+// treating it as a retryable failure would duplicate every delivery for
+// these provider families (see the comment above the call site). Disabled
+// (no-op) when RuntimeDir is unset. An I/O error is NOT swallowed: it is
+// warned on stderr, because the caller's decision to report success rests
+// entirely on this artifact existing, and a discarded write error leaves the
+// operation returning success with neither confirmation nor evidence.
+func (t *Tmux) recordUnconfirmedSubmit(session, message string) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "session: %s\n", session)
+	b.WriteString("cause: submit delivered but not confirmed (no busy-state indicator for this provider family)\n")
+	writeDiagnosticTextBlock(&b, "--- nudge text ---\n", message)
+
+	if _, err := writeSessionDiagnosticFile(t.cfg.RuntimeDir, session, "nudge-unconfirmed.log", b.String()); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: session %q diagnostic nudge-unconfirmed.log not written: %v\n", session, err)
+	}
 }
 
 // NudgePane sends a message to a specific pane reliably.

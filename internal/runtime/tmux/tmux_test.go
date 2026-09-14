@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	runtimepkg "github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
@@ -2296,10 +2297,47 @@ func TestNudgeSession_WithRetry(t *testing.T) {
 	// Give shell a moment to initialize
 	time.Sleep(200 * time.Millisecond)
 
-	// NudgeSession should succeed on a ready session
+	// NudgeSession should succeed on a ready session. A plain shell pane has
+	// no busy-state indicator, so this exercises the fallback path, which
+	// reports nil on a successful send regardless (see tmux.go:NudgeSession).
 	err := tm.NudgeSession(sessionName, "test message")
 	if err != nil {
 		t.Errorf("NudgeSession() = %v, want nil", err)
+	}
+}
+
+func TestNudgeSessionFallbackRecordsUnconfirmedDiagnostic(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	runtimeDir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.RuntimeDir = runtimeDir
+	tm := NewTmuxWithConfig(cfg)
+	sessionName := "gt-test-nudge-unconfirmed-diag-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+
+	if err := tm.NewSession(sessionName, os.TempDir()); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(200 * time.Millisecond)
+
+	// A plain shell pane (no GC_PROVIDER) takes the fallback path, which can
+	// never confirm delivery. The send must still report success...
+	if err := tm.NudgeSession(sessionName, "test message"); err != nil {
+		t.Fatalf("NudgeSession() = %v, want nil", err)
+	}
+
+	// ...while recording a best-effort diagnostic so the gap stays
+	// observable (bead dr-6siig DoD option (b)).
+	path := filepath.Join(citylayout.SessionDiagnosticsDirForRuntimeDir(runtimeDir), sessionName, "nudge-unconfirmed.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected diagnostic file at %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), "test message") {
+		t.Errorf("diagnostic file = %q, want it to contain the nudge text", string(data))
 	}
 }
 
