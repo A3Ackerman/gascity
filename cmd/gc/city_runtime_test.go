@@ -638,6 +638,10 @@ func (d *managedDoltPreflightOrderDispatcher) drain(context.Context) bool {
 	return true
 }
 
+func (d *managedDoltPreflightOrderDispatcher) inFlightTrackingIDs() map[string]struct{} {
+	return nil
+}
+
 func hasLabelPrefix(labels []string, prefix string) bool {
 	for _, label := range labels {
 		if strings.HasPrefix(label, prefix) {
@@ -1554,6 +1558,10 @@ func (r *recordingOrderDispatcher) drain(ctx context.Context) bool {
 	return true
 }
 
+func (r *recordingOrderDispatcher) inFlightTrackingIDs() map[string]struct{} {
+	return nil
+}
+
 type blockingOrderDispatcher struct {
 	mu         sync.Mutex
 	drainCalls int
@@ -1583,6 +1591,10 @@ func (b *blockingOrderDispatcher) drain(ctx context.Context) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+func (b *blockingOrderDispatcher) inFlightTrackingIDs() map[string]struct{} {
+	return nil
 }
 
 func (b *blockingOrderDispatcher) waitForDrainCalls(t *testing.T, want int) {
@@ -1943,8 +1955,9 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	// just order-tracking-sweep's own. The old narrow scope only swept the
 	// sweep order's tracking to bootstrap it, relying on order-tracking-sweep
 	// to then clean the rest — a single-point-of-failure that jammed every
-	// order when slow reconciler cycles kept that one order from firing. The
-	// staleAfter cutoff still protects in-flight dispatches regardless of order.
+	// order when slow reconciler cycles kept that one order from firing. What
+	// keeps a live run's marker open is the dispatcher's in-flight set, not the
+	// staleAfter cutoff (#5481); nothing is in flight here.
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{
 		Title:  "order:" + orderTrackingSweepOrder,
@@ -2399,6 +2412,105 @@ func TestOrderTrackingSweepWatchdogKeepsInFlightExecTrackingOpen(t *testing.T) {
 	}
 	if total := execLaunches.Load(); total != concurrent {
 		t.Fatalf("exec launches = %d after drain but %d at the overlap check; a launch escaped the in-flight count", total, concurrent)
+	}
+	if ids := mad.inFlightTrackingIDs(); len(ids) != 0 {
+		t.Errorf("in-flight tracking IDs after drain = %v, want none: a finished run still shields its marker", ids)
+	}
+}
+
+// TestOrderTrackingSweepWatchdogSkipsOnlyInFlightTracking pins the edges of the
+// #5481 skip. A retired dispatcher (its reload drain timed out) still holds its
+// runs, so their markers stay open, and an ID two live runs share stays open
+// until both have ended. A skipped marker spends none of the close budget and is
+// not counted as closed. Every stale marker no live run holds is still closed,
+// and so is a live run's marker once the run has ended without closing it.
+func TestOrderTrackingSweepWatchdogSkipsOnlyInFlightTracking(t *testing.T) {
+	store := beads.NewMemStore()
+	createTracking := func(order string) beads.Bead {
+		t.Helper()
+		b, err := store.Create(beads.Bead{
+			Title:  "order:" + order,
+			Labels: []string{orders.RunLabel(order), labelOrderTracking},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", order, err)
+		}
+		return b
+	}
+	assertStatus := func(id, want string) {
+		t.Helper()
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != want {
+			t.Errorf("tracking %s status = %s, want %s", id, got.Status, want)
+		}
+	}
+
+	orphans := make([]beads.Bead, 0, orderTrackingSweepCloseBudget)
+	for i := range orderTrackingSweepCloseBudget {
+		orphans = append(orphans, createTracking(fmt.Sprintf("orphan-%d", i)))
+	}
+	// Created last, so the stale read lists it first: if it spent budget, one
+	// orphan would stay open.
+	live := createTracking("slow-exec")
+
+	// Two live runs hold the ID, as a city run and a rig run can when their
+	// scope-local file stores both number beads from gc-1.
+	retired := &memoryOrderDispatcher{}
+	retired.addInflight(live.ID)
+	retired.addInflight(live.ID)
+	snapshot := retired.inFlightTrackingIDs()
+	delete(snapshot, live.ID)
+	if _, held := retired.inFlightTrackingIDs()[live.ID]; !held {
+		t.Fatalf("inFlightTrackingIDs returned the live map: deleting from a snapshot released %s", live.ID)
+	}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{
+		cityName:                "test-city",
+		cfg:                     &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore:     store,
+		od:                      &memoryOrderDispatcher{},
+		retiredOrderDispatchers: []orderDispatcher{retired},
+		stdout:                  io.Discard,
+		stderr:                  &stderr,
+		logPrefix:               "gc test",
+	}
+
+	now := live.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Second)
+	stale, err := orders.NewStore(beads.OrdersStore{Store: store}).StaleOpenRuns(now.Add(-orderTrackingSweepWatchdogStaleAfter))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns: %v", err)
+	}
+	staleIDs := make([]string, 0, len(stale))
+	for _, run := range stale {
+		staleIDs = append(staleIDs, run.ID)
+	}
+	if len(staleIDs) != len(orphans)+1 || staleIDs[0] != live.ID {
+		t.Fatalf("precondition: stale read = %v, want all %d markers with live run %s first", staleIDs, len(orphans)+1, live.ID)
+	}
+
+	cr.runOrderTrackingSweepWatchdog(now)
+	assertStatus(live.ID, "open")
+	for _, orphan := range orphans {
+		assertStatus(orphan.ID, "closed")
+	}
+	if want := fmt.Sprintf("closed %d stale tracking bead(s)", len(orphans)); !strings.Contains(stderr.String(), want) {
+		t.Errorf("watchdog log = %q, want %q: the skipped marker must not count as closed", stderr.String(), want)
+	}
+
+	// One run ends; the other still holds the ID.
+	retired.doneInflight(live.ID)
+	cr.runOrderTrackingSweepWatchdog(now.Add(orderTrackingSweepWatchdogInterval))
+	assertStatus(live.ID, "open")
+
+	// The last run ends and its own close failed: the marker is an orphan now.
+	retired.doneInflight(live.ID)
+	cr.runOrderTrackingSweepWatchdog(now.Add(2 * orderTrackingSweepWatchdogInterval))
+	assertStatus(live.ID, "closed")
+	if ids := retired.inFlightTrackingIDs(); len(ids) != 0 {
+		t.Errorf("in-flight tracking IDs after both runs ended = %v, want none", ids)
 	}
 }
 
