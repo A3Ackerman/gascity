@@ -8,7 +8,7 @@ permissions:
 
 env:
   DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.2.2"
+  BD_VERSION: "v1.3.0"
   # Bypass the systemd gascity-test.slice re-exec on CI runners. The Blacksmith
   # runners' user systemd cannot reliably create a transient --scope for the
   # heavy acceptance workloads; gc_test_slice_reexec then exec's
@@ -331,6 +331,9 @@ jobs:
           test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL or GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
       - name: Run integration shard
         run: ${{ matrix.command }}
+      - name: Verify managed Beads native and CLI compatibility
+        if: matrix.shard_name == 'bdstore'
+        run: GC_FAST_UNIT=0 go test -tags integration ./cmd/gc -run '^TestManagedBeadsNativeCLICompatibility$' -count=1 -timeout=5m -v
 
   ubuntu_tutorial:
     name: ubuntu / tutorial goldens / ${{ matrix.shard_index }} of 6
