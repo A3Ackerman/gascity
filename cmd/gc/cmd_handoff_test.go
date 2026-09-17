@@ -143,8 +143,8 @@ func TestWaitForControllerRestartHandoffFlagCleared(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
-		10*time.Millisecond, 5*time.Second, &stderr)
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker",
+		5*time.Second, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 when flag cleared; stderr: %s", code, stderr.String())
 	}
@@ -173,8 +173,8 @@ func TestWaitForControllerRestartHandoffFlagClearedButSessionStillRunning(t *tes
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, sp, "worker", "gc handoff",
-		10*time.Millisecond, 50*time.Millisecond, &stderr)
+	code := waitForControllerRestart(context.Background(), dops, sp, "worker",
+		50*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 (flag cleared but session still running is not success); stderr: %s", code, stderr.String())
 	}
@@ -190,8 +190,8 @@ func TestWaitForControllerRestartHandoffTimeout(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
-		10*time.Millisecond, 25*time.Millisecond, &stderr)
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker",
+		25*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
 	}
@@ -211,8 +211,8 @@ func TestWaitForControllerRestartHandoffTimeoutReportsLastPollError(t *testing.T
 	dops.restartReadErr = errors.New("metadata read failed")
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
-		10*time.Millisecond, 25*time.Millisecond, &stderr)
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker",
+		25*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
 	}
@@ -232,8 +232,8 @@ func TestWaitForControllerRestartHandoffContextCancel(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- waitForControllerRestart(ctx, dops, runtime.NewFake(), "worker", "gc handoff",
-			10*time.Millisecond, 30*time.Second, &stderr)
+		done <- waitForControllerRestart(ctx, dops, runtime.NewFake(), "worker",
+			30*time.Second, &stderr)
 	}()
 
 	time.Sleep(30 * time.Millisecond)
