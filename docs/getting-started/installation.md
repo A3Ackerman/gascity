@@ -41,6 +41,12 @@ under heavy write load.
 
 The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
 
+Gas City 1.4.2 pairs its native store with Beads 1.3.0. When upgrading an
+existing shared database from Beads 1.2.2, coordinate the upgrade of all clients
+using that database, then run `bd migrate schema` from the workspace. The tested
+upgrade moves schema 53 to 66 and preserves existing beads. Older clients cannot
+use the migrated schema. Fresh workspaces initialize directly at the new schema.
+
 ## Homebrew (recommended)
 
 ```bash
