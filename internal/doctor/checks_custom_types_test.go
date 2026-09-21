@@ -16,7 +16,7 @@ import (
 
 func TestCustomTypesCheck_NoBeadsDir(t *testing.T) {
 	dir := t.TempDir()
-	c := NewCustomTypesCheck(dir, "test")
+	c := NewCustomTypesCheck(dir, "test", "")
 	r := c.Run(&CheckContext{CityPath: dir})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK (no .beads dir)", r.Status)
@@ -56,7 +56,7 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := NewCustomTypesCheck(dir, "test")
+	c := NewCustomTypesCheck(dir, "test", "")
 	// This will fail because bd isn't initialized in the temp dir.
 	// The check should report a warning (can't read config).
 	r := c.Run(&CheckContext{CityPath: dir})
@@ -353,7 +353,7 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 		t.Fatalf("dolt sql delete: %v\n%s", err, out)
 	}
 
-	c := NewCustomTypesCheck(dir, "test")
+	c := NewCustomTypesCheck(dir, "test", "")
 	r := c.Run(&CheckContext{CityPath: dir})
 	if r.Status != StatusError {
 		t.Fatalf("Run status = %v, want StatusError (table drift); message=%q", r.Status, r.Message)
@@ -369,7 +369,7 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 		t.Fatalf("Fix: %v", err)
 	}
 
-	c2 := NewCustomTypesCheck(dir, "test")
+	c2 := NewCustomTypesCheck(dir, "test", "")
 	r2 := c2.Run(&CheckContext{CityPath: dir})
 	if r2.Status != StatusOK {
 		t.Fatalf("after Fix, Run status = %v, want StatusOK; message=%q", r2.Status, r2.Message)
@@ -555,7 +555,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 	t.Setenv("GC_BEADS_BACKEND", "doltlite")
 	t.Setenv("GC_DOLT_DATABASE", "wrong-db")
-	c := NewCustomTypesCheck(targetDir, "target")
+	c := NewCustomTypesCheck(targetDir, "target", "")
 	ctx := &CheckContext{CityPath: targetDir}
 	if result := c.Run(ctx); result.Status != StatusError {
 		t.Fatalf("Run status = %v, want StatusError for missing required target types; message=%q", result.Status, result.Message)
@@ -563,7 +563,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	if err := c.Fix(ctx); err != nil {
 		t.Fatalf("Fix: %v", err)
 	}
-	if result := NewCustomTypesCheck(targetDir, "target").Run(ctx); result.Status != StatusOK {
+	if result := NewCustomTypesCheck(targetDir, "target", "").Run(ctx); result.Status != StatusOK {
 		t.Fatalf("Run after Fix status = %v, want StatusOK; message=%q", result.Status, result.Message)
 	}
 
@@ -794,7 +794,7 @@ func TestCustomTypesCheck_RequiredTypesComplete(t *testing.T) {
 		"event": true, "gate": true, "merge-request": true,
 		"agent": true, "role": true, "rig": true,
 		"session": true, "spec": true, "convergence": true,
-		"step": true,
+		"step": true, "startup-health-episode": true,
 	}
 	for _, typ := range RequiredCustomTypes {
 		if !expected[typ] {
