@@ -1547,8 +1547,9 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 // exactly those two reads for one id, so the batched pair sees the same rows
 // — and a frontier of N candidates costs two storage API calls instead of N
 // (each one a round trip on a served store), which over a network link
-// exhausted the whole read-retry budget every controller tick (gc-weph). A storage without the batched edge read takes the
-// per-candidate path unchanged.
+// exhausted the whole read-retry budget every controller tick (#6491). A
+// storage without the batched edge read takes the per-candidate path
+// unchanged.
 func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage beadslib.Storage, candidates []Bead) ([]Bead, error) {
 	if len(candidates) == 0 {
 		return candidates, nil

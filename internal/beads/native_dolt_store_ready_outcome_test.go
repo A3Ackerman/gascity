@@ -178,7 +178,7 @@ func assertReadyOutcomeFiltered(t *testing.T, got, candidates []Bead, removed ma
 // TestNativeDoltStoreReadyWorkOutcomeFilterBatchesBlockerRead pins the cost
 // of the gc.work_outcome veto on a batch-capable storage: N candidates cost
 // exactly one edge read and one issue read, not one storage API call per
-// candidate (gc-weph — on a served store each call is a round trip, and one
+// candidate (#6491 — on a served store each call is a round trip, and one
 // per candidate exhausted the whole native read-retry budget every controller
 // tick). The filtered set must be exactly what the veto rule says.
 func TestNativeDoltStoreReadyWorkOutcomeFilterBatchesBlockerRead(t *testing.T) {
