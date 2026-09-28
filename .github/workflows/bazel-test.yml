@@ -128,6 +128,11 @@ jobs:
         run: |
           mkdir -p /tmp/gc-test-home
           echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
+          # .bazelrc sets test --test_tmpdir=/tmp/bt and
+          # --sandbox_writable_path=/tmp/bt unconditionally (#6525). Nothing
+          # else creates that directory on the runner, so every sandboxed
+          # action fails on a cold runner without this.
+          mkdir -p /tmp/bt
 
       - name: "bazel test //..."
         run: |
