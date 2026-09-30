@@ -36,6 +36,8 @@ var (
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
+	_ runtime.BackendListingProvider        = (*Provider)(nil)
+	_ runtime.ListingAttestation            = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -374,12 +376,24 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // ListRunning queries both backends and returns best-effort results plus a
 // partial-list error when one backend fails.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
+	return runtime.MergeBackendListings(p.ListRunningByBackend(prefix))
+}
+
+// ListRunningByBackend implements [runtime.BackendListingProvider]: one
+// ListRunning call per backend, default first.
+func (p *Provider) ListRunningByBackend(prefix string) []runtime.BackendListing {
 	defaultList, dErr := p.defaultSP.ListRunning(prefix)
 	acpList, aErr := p.acpSP.ListRunning(prefix)
-	return runtime.MergeBackendListResults(
-		runtime.BackendListResult{Label: "default", Names: defaultList, Err: dErr},
-		runtime.BackendListResult{Label: "acp", Names: acpList, Err: aErr},
-	)
+	return []runtime.BackendListing{
+		{Label: "default", Provider: p.defaultSP, Names: defaultList, Err: dErr},
+		{Label: "acp", Provider: p.acpSP, Names: acpList, Err: aErr},
+	}
+}
+
+// ListRunningComplete implements [runtime.ListingAttestation]: the merged
+// listing is complete only when both backends attest theirs.
+func (p *Provider) ListRunningComplete() bool {
+	return runtime.ListRunningAttested(p.defaultSP) && runtime.ListRunningAttested(p.acpSP)
 }
 
 // GetLastActivity delegates to the routed backend.

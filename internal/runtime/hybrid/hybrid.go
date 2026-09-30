@@ -28,6 +28,8 @@ var (
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
+	_ runtime.BackendListingProvider        = (*Provider)(nil)
+	_ runtime.ListingAttestation            = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -206,12 +208,24 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // ListRunning queries both backends and returns best-effort results plus a
 // partial-list error when one backend fails.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
+	return runtime.MergeBackendListings(p.ListRunningByBackend(prefix))
+}
+
+// ListRunningByBackend implements [runtime.BackendListingProvider]: one
+// ListRunning call per backend, local first.
+func (p *Provider) ListRunningByBackend(prefix string) []runtime.BackendListing {
 	local, lErr := p.local.ListRunning(prefix)
 	remote, rErr := p.remote.ListRunning(prefix)
-	return runtime.MergeBackendListResults(
-		runtime.BackendListResult{Label: "local", Names: local, Err: lErr},
-		runtime.BackendListResult{Label: "remote", Names: remote, Err: rErr},
-	)
+	return []runtime.BackendListing{
+		{Label: "local", Provider: p.local, Names: local, Err: lErr},
+		{Label: "remote", Provider: p.remote, Names: remote, Err: rErr},
+	}
+}
+
+// ListRunningComplete implements [runtime.ListingAttestation]: the merged
+// listing is complete only when both backends attest theirs.
+func (p *Provider) ListRunningComplete() bool {
+	return runtime.ListRunningAttested(p.local) && runtime.ListRunningAttested(p.remote)
 }
 
 // GetLastActivity delegates to the routed backend.
