@@ -2181,13 +2181,39 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 }
 
 // asyncStartPreparedCommandStaleInfo is the async-start command-drift gate: it
-// reads the current session's resolved command off Info.Command (the raw "command"
-// mirror, TrimSpace-equivalent). The prepared side is the resolved template command
-// (tp.Command). It is the sole form (the raw sibling was deleted in WI-6 R4).
+// compares the commit-time persisted command (current.Command) against the
+// prepared template command (tp.Command) and, for one row class, against the
+// enqueue-time persisted command (prepared.candidate.info.Command, the in-lock
+// re-read from prepareStartCandidateForCity). It is the sole form (the raw
+// sibling was deleted in WI-6 R4).
+//
+// Two rules keep a start from being discarded:
+//   - R1, every row: a persisted command equal to the prepared command, or a
+//     prefix-extension of it (the worker boundary's augmented form,
+//     shouldPreserveStoredRuntimeCommand), is the same command (ga-2ygo4s).
+//   - R2, a wake of an already-committed row (no pending_create_claim, state
+//     queued or creating): a persisted command unchanged since enqueue is not
+//     a change DURING startup. Nothing on the commit path repairs it, so
+//     discarding would repeat every wave forever (ga-k88yuh).
+//
+// Any other difference is stale. A pending create then reaches
+// asyncStartDriftRollbackEligibleInfo, which rolls it back so it releases its
+// alias; every other row is discarded and retried.
 func asyncStartPreparedCommandStaleInfo(prepared preparedStart, current sessionpkg.Info) bool {
 	preparedCommand := strings.TrimSpace(prepared.candidate.tp.Command)
 	currentCommand := strings.TrimSpace(current.Command)
-	return preparedCommand != "" && currentCommand != "" && preparedCommand != currentCommand
+	if preparedCommand == "" || currentCommand == "" {
+		return false
+	}
+	if currentCommand == preparedCommand || shouldPreserveStoredRuntimeCommand(currentCommand, preparedCommand) {
+		return false
+	}
+	if !current.PendingCreateClaim &&
+		pendingCreateQueuedOrCreatingState(current.MetadataState) &&
+		currentCommand == strings.TrimSpace(prepared.candidate.info.Command) {
+		return false
+	}
+	return true
 }
 
 // clearPendingStartInFlightLease clears last_woke_at for the session handle so a
