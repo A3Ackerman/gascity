@@ -41,13 +41,15 @@ func newAllocFixture(t *testing.T, cfg *config.City) *allocFixture {
 		t:     t,
 		attrs: make(map[string]InventoryAttrs),
 		in: allocInputs{
-			Now:       allocNow,
-			Epoch:     "e1",
-			Cfg:       cfg,
-			ConfigRev: "rev-1",
-			CityPath:  "/city",
-			CityName:  "city",
-			ObsMaxAge: observeMaxAge,
+			Now:              allocNow,
+			Epoch:            "e1",
+			SelGen:           1,
+			Cfg:              cfg,
+			ConfigRev:        "rev-1",
+			CityPath:         "/city",
+			CityName:         "city",
+			ObsMaxAge:        observeMaxAge,
+			ScaleCheckMaxAge: time.Minute,
 		},
 	}
 }
@@ -58,9 +60,9 @@ func (f *allocFixture) sessions(rows ...beads.Bead) *allocFixture {
 	return f
 }
 
-// leg adds a further census leg.
-func (f *allocFixture) leg(ref string, rows ...beads.Bead) *allocFixture {
-	f.legs = append(f.legs, classStoreCandidate{ref: ref, store: censusStore(rows...)})
+// rigLeg adds a further census leg, rig:a.
+func (f *allocFixture) rigLeg(rows ...beads.Bead) *allocFixture {
+	f.legs = append(f.legs, classStoreCandidate{ref: "rig:a", store: censusStore(rows...)})
 	return f
 }
 
@@ -378,6 +380,20 @@ func TestAllocator_OccupiedNameIsNoneNeverGrantedOrDrained(t *testing.T) {
 				t.Errorf("suspended=%v occupied row %s = %s/%s in-desired=%v %+v, want none name-occupied, no assigned work", suspended, sibling, e.Desired, e.Reason, e.InDesired, e.AssignedWork)
 			}
 		}
+	}
+}
+
+// Kills: C11 skipped for a configured named row (M14). The named session's
+// only canonical row has its runtime name held by a closed bead's runtime:
+// it is None(name-occupied), and no named plan replaces it.
+func TestAllocator_OccupiedNamedRowIsNone(t *testing.T) {
+	d := newAllocFixture(t, chatCity("always")).sessions(chatRow("gc-1", "3", "session_name", "chat", "state", "asleep")).
+		alive("chat", InventoryAttrs{OwnerState: OwnerSession, OwnerID: "gc-0"}).decide()
+	if e := entryOf(t, d, "gc-1"); e.Desired != desireNone || e.Reason != reasonNameOccupied || e.InDesired {
+		t.Fatalf("occupied named row = %s/%s in-desired=%v, want none name-occupied", e.Desired, e.Reason, e.InDesired)
+	}
+	if hasNamedPlan(d) {
+		t.Fatalf("plans %+v, want no named plan for an occupied identity", d.Plans)
 	}
 }
 
@@ -806,7 +822,7 @@ func TestAllocator_StoreQueryPartialRetains(t *testing.T) {
 func TestAllocator_DuplicatesNone(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("other", 3)}}
 	row := poolRow("gc-1", "other", 1, "asleep")
-	d := newAllocFixture(t, cfg).sessions(row).leg("rig:a", row).decide()
+	d := newAllocFixture(t, cfg).sessions(row).rigLeg(row).decide()
 	dup := d.Snapshot.Entries[rowKey{"rig:a", "gc-1"}]
 	if dup == nil || dup.Desired != desireNone || dup.Reason != reasonDuplicate || dup.Identity == nil || dup.Identity.DuplicateOf != allocSessionsLeg {
 		t.Fatalf("duplicate copy = %+v", dup)
