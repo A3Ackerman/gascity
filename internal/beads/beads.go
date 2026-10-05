@@ -41,6 +41,12 @@ var ErrMetadataParse = errors.New("bead metadata parse")
 // cannot answer without consulting the backing store.
 var ErrCacheUnavailable = errors.New("bead cache unavailable")
 
+// ErrRowRefreshFenced is returned by CachingStore.RefreshRow when a local
+// write, deletion or applied event newer than its backing read owns the row,
+// or a reconcile or full Prime merged since the read began, so the read
+// installed nothing. The caller may retry.
+var ErrRowRefreshFenced = errors.New("bead cache row refresh fenced by newer state")
+
 // ErrReadyContextUnsupported reports that a store cannot guarantee a Ready
 // projection stops when the caller's context is canceled.
 var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
@@ -48,6 +54,12 @@ var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
 // ErrStoreClosed is returned when a caller uses a bead store after its backing
 // handle has been closed.
 var ErrStoreClosed = errors.New("bead store closed")
+
+// ErrSQLiteBusyExhausted marks a SQLiteStore write whose every attempt failed
+// with SQLITE_BUSY, so it committed nothing: each attempt is one transaction,
+// and SQLite applies no statement, and commits no transaction, that reports
+// BUSY. The error's message stays the driver's.
+var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
 
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
@@ -97,7 +109,7 @@ type Bead struct {
 	//
 	// Weak, therefore, is the contract and not an admission. A store persists
 	// and filters this verbatim (Children and ListQuery.ParentID are string
-	// matches), and for any id OUTSIDE the namespace it mints it must never
+	// matches), and for any id in a namespace it does not serve it must never
 	// resolve, validate, rewrite, or place by it. A store that started
 	// rejecting an id it cannot see would break every cross-store molecule at
 	// once, and a store that started placing by it would strand the child in
@@ -107,12 +119,34 @@ type Bead struct {
 	// where the backends can actually agree. A dangling id INSIDE a store's own
 	// namespace is a row that store can see the absence of, and the strong
 	// backends refuse it before writing anything; the weak ones cannot detect
-	// it at all. That divergence is left explicit rather than papered over —
-	// what every backend owes is that a foreign parent is carried without
-	// question. The conformance suite pins that owing for the providers that
-	// execute it (SQLite, native Dolt, mem, file, exec); it is not yet verified
-	// against the bd provider, whose RunStoreTests row is skipped pending a
-	// version bump (ga-e7z613), so there the contract holds by convention.
+	// it at all. Which ids count as inside is read off the STORE, not off the
+	// child — a row carrying another ledger's prefix (a pinned id, a relic a
+	// migration copied in) does not move the boundary — and, on a backend whose
+	// library resolves same-prefix dependency targets itself, off the child's
+	// prefix as well. What must never be resolved is an id in a namespace
+	// neither of those names. That divergence is left explicit rather than
+	// papered over — what the conformance suite pins, and what every provider
+	// here owes except the one named next, is that a foreign parent is carried
+	// without question.
+	//
+	// MemStore, FileStore, SQLiteStore and the script-backed exec provider
+	// carry every parent verbatim, resolving none of them. NativeDoltStore
+	// carries a foreign one the same way and additionally refuses a dangling id
+	// inside the namespace it serves, before writing anything — the strong
+	// reading, which its library forces (issueops resolves a same-prefix
+	// dependency target itself, post-commit).
+	//
+	// The bd-CLI provider (BdStore) is the exception, and it is named rather
+	// than implied. It hands this field to bd as --parent on Create and Update,
+	// and bd resolves it unconditionally: an id bd cannot see fails the command
+	// outright, and one it can see supplies the child's id, so placement follows
+	// the parent's namespace instead of the child's class. That is bd's
+	// contract, not something this package layers over it, and the provider is
+	// left following the tool it drives. Nothing in CI can see the divergence
+	// either — the only conformance run over a real bd is skipped (ga-e7z613).
+	// ga-6od57 tracks making the provider comply or un-skipping that run; until
+	// one of them lands, a caller pointing a bd-backed store at a parent in
+	// another ledger gets a refusal, not a weak reference.
 	ParentID    string   `json:"parent,omitempty"`
 	Ref         string   `json:"ref,omitempty"`         // formula step ID or formula name
 	Needs       []string `json:"needs,omitempty"`       // dependency step refs
@@ -207,6 +241,34 @@ type UpdateOpts struct {
 // the expected snapshot.
 type ConditionalAssignmentReleaser interface {
 	ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
+}
+
+// AssignmentGuardedUpdater is implemented by stores whose backend can apply an
+// update only while the bead still has an expected status and assignee,
+// checked inside the same write. It fences an assignment change on the facts
+// it was decided from where the store has no revision fence: BdStore without
+// --if-revision answers it with `bd update --if-status --if-assignee`.
+//
+// An empty expectedAssignee means the bead must be unassigned. UpdateIfAssignment
+// reports true when the update landed, and false with nothing written when the
+// status or assignee no longer match or the id resolves to no bead. A store
+// whose backend lacks the guard returns ErrConditionalWriteUnsupported, also
+// with nothing written. opts follows the UpdateIfMatch shape: no labels and no
+// parent, because the guard does not cover them.
+type AssignmentGuardedUpdater interface {
+	UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts UpdateOpts) (bool, error)
+}
+
+// AssignmentGuardedUpdaterFor returns the guarded-update capability of store,
+// following declared conditional-writes resolution targets exactly as
+// MetadataCASWriterFor does. Like ConditionalWriterForTarget it applies no
+// rollout mode.
+func AssignmentGuardedUpdaterFor(store Store) (AssignmentGuardedUpdater, bool) {
+	if store == nil {
+		return nil, false
+	}
+	updater, ok := followConditionalWritesResolveTarget(store).(AssignmentGuardedUpdater)
+	return updater, ok
 }
 
 // ConditionalWriter is implemented by stores that can apply a write only when
@@ -377,6 +439,23 @@ func ConditionalWriterFor(store Store) (ConditionalWriter, bool) {
 		return provider.ConditionalWriterHandle()
 	}
 	return nil, false
+}
+
+// ConditionalWriterForTarget is ConditionalWriterFor on the store a wrapper
+// declares as its conditional-writes resolution target
+// (ConditionalWritesResolveTargeter), which is how MetadataCASWriterFor and
+// AtomicConditionalCloserFor find their capabilities through the cmd/gc
+// policy store and the typed class wrappers. Like them it applies no rollout
+// mode: it serves effects that must fence whenever the store can, such as a
+// destructive delete or an ownership release. A writer it returns can still
+// answer ErrConditionalWriteUnsupported at call time (BdStore without
+// --if-revision, a legacy SQLite layout), and the caller decides what that
+// means.
+func ConditionalWriterForTarget(store Store) (ConditionalWriter, bool) {
+	if store == nil {
+		return nil, false
+	}
+	return ConditionalWriterFor(followConditionalWritesResolveTarget(store))
 }
 
 // PreconditionFailedError reports that a conditional write was rejected because
