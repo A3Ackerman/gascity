@@ -144,7 +144,14 @@ const (
 	// Bumped again (gc 1.5.1 suspension quiescence): the same step also
 	// selects TestProxiedSuspensionIsQuiescence (~8 minutes, inside the step's
 	// 45m -timeout) and its name says so. No new job, trigger or permission.
-	expectedCIExecutionHash     = "bc49242821ebcecfe16df27169265323a40d6dcfdf659aae29fe6d009f9e819f"
+	//
+	// Bumped again (OpenAPI breaking-change gate): preflight-generated gains
+	// an OPENAPI_BREAKING_BASE job env (PR base SHA, else github.sha) and a
+	// "Fetch OpenAPI breaking-change base" step that shallow-fetches that
+	// commit before `make spec-ci`, which now also runs the oasdiff gate; the
+	// spec-ci step is renamed to say so. Reviewed delta: one env var, one
+	// step, one step name; no new job, trigger or permission.
+	expectedCIExecutionHash     = "4b5ef3e8938cfd4faefdd1d06cd08342e2282a38477eeda741438c88e5fa2e13"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
