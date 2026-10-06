@@ -37,7 +37,7 @@ Note each rig's path, then stop the city:
 ```bash
 gc rig list                 # rigs and their paths; their .beads go in the backup too
 gc stop ~/my-city
-pgrep -fl "$HOME/my-city/.gc/runtime/packs/dolt"   # prints nothing once Dolt is down
+pgrep -fl "my-city/.gc/runtime/packs/dolt"   # prints nothing once Dolt is down
 ```
 
 `gc stop` stops the agents and then the city's Dolt server. A copy of the Dolt
@@ -91,22 +91,29 @@ Beads 1.3 moves the database schema from v53 to v66. `bd` migrates a store it
 runs itself automatically, but a city's databases live on the Dolt server Gas
 City manages. `bd` treats that server as shared, because other clients may
 still be running an older `bd`, so it waits for you to ask by name. Until you
-do, reads still work, and every write is refused. Gas City 1.5 does not run this
-migration for you.
+do, `bd` refuses every write, and most reads fail too: `bd list`, `bd show`
+and `bd ready` stop with `table not found: leases`. Gas City 1.5 does not run
+this migration for you.
 
 The city and each rig have their own database, so migrate each one. Start the
 city's Dolt server without its agents, migrate, then start the city:
 
 ```bash
 cd ~/my-city
-gc dolt start                                  # Dolt only; no agents yet
+gc dolt restart                                # Dolt only; no agents yet
+gc dolt status                                 # Dolt server: running (managed, …)
 gc bd --city ~/my-city migrate schema          # the city's own database
 gc bd --rig my-project migrate schema          # repeat for each rig
 ```
 
-Each run prints `Applied N schema migration(s); schema now at v66`, along with
-a warning that older `bd` clients will refuse the database. Once every `bd`
-is upgraded, the warning needs no action.
+Use `gc dolt restart` here: `gc stop` removes the Dolt runtime state that
+`gc dolt start` needs, so `gc dolt start` fails on a stopped city.
+
+Each run prints a warning that it is applying the pending schema migrations
+to a shared server database and that older `bd` clients will refuse the
+database, then `✓ Schema already at v66`. The last line says "already" even on
+the run that migrates, because `bd` applies the migrations as it opens the
+database. Once every `bd` is upgraded, the warning needs no action.
 
 <Note>
 If `bd` refuses the migration because the database has a Dolt remote, the
@@ -115,9 +122,10 @@ remote's other clones must not migrate on their own. Run
 push the result with `gc bd --rig my-project dolt push` so the other clones
 can pull it.
 
-`gc start` also starts the Dolt server before any agent. If you start the city
-before migrating, run the commands above right away: agents cannot record work
-until the migration is done.
+If you start the city before migrating, `gc start` fails with
+`city failed to start: … table not found: leases`, but it leaves Dolt running
+and the city registered. Run the two `migrate schema` commands; the supervisor
+retries and the city comes up on its own, with no second `gc start`.
 </Note>
 
 ## Start the city and check it
@@ -131,7 +139,8 @@ gc doctor
 still running the old binary, `gc start` restarts it on the new one. `gc doctor`
 reports anything left to repair; `gc doctor --fix` applies the fixes it can
 make safely, such as renaming an `[imports.gascity]` pack import to
-`[imports.gc]`.
+`[imports.gc]`. A `✗ beads-store` or `✗ rig:<name>:beads` failure that
+mentions `leases` means that scope still needs `migrate schema`.
 
 Then repair blocked flags. A Beads 1.3 schema migration can mark beads as
 blocked when they are not, which hides them from `bd ready` and stops Gas City
@@ -145,7 +154,8 @@ gc bd --city ~/my-city recompute-blocked
 gc bd --rig my-project recompute-blocked       # repeat for each rig
 ```
 
-Each run reports how many rows it corrected.
+Each run reports how many rows it corrected, or
+`is_blocked already consistent — nothing to recompute.`
 
 ## Optional: hand the city's Dolt process to Beads
 
