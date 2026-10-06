@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **New proxied scopes retire their proxy and Dolt child after 30 minutes
+  idle.** Before this release every scope gc created was pinned to never, so a
+  pair started by a stray read after `gc stop`, by `gc init --no-start`, or by
+  `gc rig add` on an unstarted city stayed resident for good (about 300 MB RSS
+  per scope). New scopes are now created with `[beads] proxied_idle_timeout`,
+  default `30m`. The next bd command restarts a retired pair transparently
+  (about half a second). One that arrives while the old pair is still shutting
+  down can wait several seconds. **Existing cities do not change.** bd cannot
+  yet change an initialized scope's idle timeout and gc does not edit bd's
+  sidecar, so scopes created before this release keep never. `gc doctor`'s
+  `proxied-idle-timeout` check reports the drift. Set `proxied_idle_timeout =
+  "0"` to keep new scopes resident. With a finite timeout the opt-in
+  `GC_BEADS_PROXIED_NATIVE` lane still serves short-lived reads natively, but
+  the controller's long-lived handles read through bd (verdict
+  `idle_policy_finite`) (#6561).
+
 - **The first `gc start` after a bd upgrade runs `bd recompute-blocked` once
   per scope.** beads migration 0059 wrongly marks some beads blocked (beads#7037).
   It hits any store that crossed 0059: one upgraded from bd v1.2.x or older,
