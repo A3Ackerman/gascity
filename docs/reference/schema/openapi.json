@@ -11629,6 +11629,10 @@
             "$ref": "#/components/schemas/StatusStoreHealth",
             "description": "Dolt bead store health summary. Omitted when unavailable."
           },
+          "stores_not_read": {
+            "description": "True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent.",
+            "type": "boolean"
+          },
           "suspended": {
             "description": "Whether the city is suspended.",
             "type": "boolean"
@@ -11979,6 +11983,11 @@
           },
           "ready": {
             "description": "Number of ready work items.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "suspended_rigs_excluded": {
+            "description": "Number of suspended rigs left out of these counts: a suspended rig's store is not read.",
             "format": "int64",
             "type": "integer"
           }

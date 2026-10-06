@@ -140,7 +140,11 @@ const (
 	// sets GC_ACCEPTANCE_TOPOLOGY_MATRIX=1 for that step (the row is gated off
 	// Tier A by that switch), and the step is renamed to say so. No new job,
 	// trigger or permission.
-	expectedCIExecutionHash     = "ac8125d1e390b7e25d1976908e05fa537574a159194aa752297d81722229ac73"
+	//
+	// Bumped again (gc 1.5.1 suspension quiescence): the same step also
+	// selects TestProxiedSuspensionIsQuiescence (~8 minutes, inside the step's
+	// 45m -timeout) and its name says so. No new job, trigger or permission.
+	expectedCIExecutionHash     = "bc49242821ebcecfe16df27169265323a40d6dcfdf659aae29fe6d009f9e819f"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

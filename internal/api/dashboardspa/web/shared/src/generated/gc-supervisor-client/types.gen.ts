@@ -4859,6 +4859,10 @@ export type StatusBody = {
      */
     store_health?: StatusStoreHealth;
     /**
+     * True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent.
+     */
+    stores_not_read?: boolean;
+    /**
      * Whether the city is suspended.
      */
     suspended: boolean;
@@ -5068,6 +5072,10 @@ export type StatusWorkCounts = {
      * Number of ready work items.
      */
     ready: number;
+    /**
+     * Number of suspended rigs left out of these counts: a suspended rig's store is not read.
+     */
+    suspended_rigs_excluded?: number;
 };
 
 export type StorageBindingOutcomePayload = {

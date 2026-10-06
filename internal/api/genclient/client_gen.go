@@ -5015,6 +5015,9 @@ type StatusBody struct {
 	SessionCountsDetail *StatusSessionCountsDetail `json:"session_counts_detail,omitempty"`
 	StoreHealth         *StatusStoreHealth         `json:"store_health,omitempty"`
 
+	// StoresNotRead True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent.
+	StoresNotRead *bool `json:"stores_not_read,omitempty"`
+
 	// Suspended Whether the city is suspended.
 	Suspended bool `json:"suspended"`
 
@@ -5192,6 +5195,9 @@ type StatusWorkCounts struct {
 
 	// Ready Number of ready work items.
 	Ready int64 `json:"ready"`
+
+	// SuspendedRigsExcluded Number of suspended rigs left out of these counts: a suspended rig's store is not read.
+	SuspendedRigsExcluded *int64 `json:"suspended_rigs_excluded,omitempty"`
 }
 
 // StorageBindingOutcomePayload defines model for StorageBindingOutcomePayload.
