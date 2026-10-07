@@ -125,6 +125,7 @@ go_test(
         "//internal/runtime/runtimetest",
         "//internal/shellquote",
         "//internal/testenv",
+        "//internal/testutil",
         "//internal/worker/workertest",
         "//test/tmuxtest",
     ],
