@@ -3627,7 +3627,7 @@ func sweepProcessTableOrphans(
 	}
 	found, err := scanner.FindRuntimesBySessionID("")
 	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %s\n", proctable.SummarizeScanError(err)) //nolint:errcheck
 	}
 
 	cityPath = normalizePathForCompare(strings.TrimSpace(cityPath))
