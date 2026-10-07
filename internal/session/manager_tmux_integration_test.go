@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
@@ -26,6 +27,24 @@ import (
 // failure rather than record the seat suspended. Once the server is really
 // dead, the same suspend succeeds.
 func TestSuspend_RealTmuxDeletedSocketFailsAndDeadServerSucceeds(t *testing.T) {
+	testSuspendDeletedSocketAndDeadServer(t, func(cfg tmux.Config) runtime.Provider { return tmux.NewProviderWithConfig(cfg) })
+}
+
+// TestSuspend_AutoRealTmuxDeletedSocketFailsAndDeadServerSucceeds is the same
+// check through the auto router over the seam-backed tmux leaf, the shape a
+// city with ACP agents composes: auto must neither merge the deleted socket's
+// answer into success nor hide the tmux backend's confirmer from
+// StopForCleanup.
+func TestSuspend_AutoRealTmuxDeletedSocketFailsAndDeadServerSucceeds(t *testing.T) {
+	testSuspendDeletedSocketAndDeadServer(t, func(cfg tmux.Config) runtime.Provider {
+		return sessionauto.New(tmux.NewSeamBackedWithConfig(cfg), runtime.NewFake())
+	})
+}
+
+// testSuspendDeletedSocketAndDeadServer runs the deleted-socket and
+// dead-server suspends against the real tmux provider newProvider builds.
+func testSuspendDeletedSocketAndDeadServer(t *testing.T, newProvider func(tmux.Config) runtime.Provider) {
+	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
@@ -45,7 +64,7 @@ func TestSuspend_RealTmuxDeletedSocketFailsAndDeadServerSucceeds(t *testing.T) {
 	socketPath := filepath.Join(socketRoot, fmt.Sprintf("tmux-%d", os.Getuid()), cfg.SocketName)
 	tm := tmux.NewTmuxWithConfig(cfg)
 
-	mgr := NewManagerWithOptions(beads.NewMemStore(), tmux.NewProviderWithConfig(cfg))
+	mgr := NewManagerWithOptions(beads.NewMemStore(), newProvider(cfg))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "sleep 600", WorkDir: t.TempDir(), Provider: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
