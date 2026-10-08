@@ -1853,9 +1853,10 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	}
 	// SURGICAL route: the session-class consumers (session-ID resolution, session
 	// worker handle, session bead read) go through the session coordination-class
-	// store for relocation-safety; the post-close work-release below
-	// (unclaimWorkAssignedToRetiredSessionBead) is WORK-class and stays on the
-	// generic store.
+	// store for relocation-safety. The post-close work-release below
+	// (unclaimWorkAssignedToRetiredSessionBeadVia) releases WORK-class beads
+	// through the generic store and clears the session bead's claim back-channel
+	// in sessStore.
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
 	if err != nil {
@@ -1910,7 +1911,10 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	if cityErr == nil && cfg != nil {
 		rigStores = buildStandaloneRigStoresWithConfig(cfg, cityPath, stderr)
 	}
-	unclaimWorkAssignedToRetiredSessionBead(cityPath, cfg, store, rigStores, closedSessionBead, "", stderr)
+	// The session bead lives in the sessions-class store (sessStore), which on a
+	// split city is not the work store the sweep leads with; the claim
+	// back-channel must be cleared where the session bead actually is.
+	unclaimWorkAssignedToRetiredSessionBeadVia(cityPath, cfg, store, sessStore, rigStores, closedSessionBead, "", stderr)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
