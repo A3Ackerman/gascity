@@ -290,6 +290,31 @@ type ConditionalAssignmentReleaser interface {
 	ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
 }
 
+// ConditionalAssigneeTransferer is implemented by stores that can move an
+// in-progress assignment from one exact assignee spelling to another only
+// while the bead still carries the expected holder -- the same capability
+// family as ConditionalAssignmentReleaser, with the opposite terminal
+// assignee (a new holder instead of none). See BdStore.TransferIfCurrent
+// (bdstore_conditional_release.go) and NativeDoltStore.TransferIfCurrent
+// (native_dolt_store_conditional.go) for the full per-store contract,
+// including the reassignment-steal fence each skips because the CAS names
+// the holder explicitly. A store that cannot atomically transfer reports
+// ErrConditionalTransferUnsupported, discovered the same way as every other
+// optional capability here: type-assert on the resolved store, never on a
+// wrapper.
+//
+// GROUNDWORK: no production caller depends on this interface yet. Outside
+// the forwarding wrappers, the only production TransferIfCurrent call is
+// cmd/gc's hookClaimRestampWithBdStore, on a BdStore it constructs itself.
+// CachingStore and cmd/gc's emitting class-store wrapper forward the
+// capability. Wrappers that forward ReleaseIfCurrent but not this include
+// ProxiedStore, the cmd/gc policy wrapper and splittest's StrictStore, so a
+// type assertion on any of them fails even over a capable store. Wire them
+// before the first caller relies on the capability through a wrapper.
+type ConditionalAssigneeTransferer interface {
+	TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error)
+}
+
 // AssignmentGuardedUpdater is implemented by stores whose backend can apply an
 // update only while the bead still has an expected status and assignee,
 // checked inside the same write. It fences an assignment change on the facts

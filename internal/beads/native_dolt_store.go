@@ -311,7 +311,7 @@ func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context
 	}
 	var prefix string
 	if readPrefix {
-		prefix, err = storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
+		prefix, err = nativeReadIssuePrefix(ctx, storage)
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
@@ -560,6 +560,7 @@ func WithNativeDoltStoreReservedIDPrefixes(prefixes ...string) NativeDoltStoreOp
 var (
 	_ Store                         = (*NativeDoltStore)(nil)
 	_ ConditionalAssignmentReleaser = (*NativeDoltStore)(nil)
+	_ ConditionalAssigneeTransferer = (*NativeDoltStore)(nil)
 	_ AtomicTxStore                 = (*NativeDoltStore)(nil)
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
@@ -649,6 +650,24 @@ func OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx context.Conte
 // Dolt-backed ledger mints under.
 const nativeIssuePrefixConfigKey = "issue_prefix"
 
+// nativeReadIssuePrefix reads the configured issue prefix through the
+// issueops.WorkspaceConfig role rather than the raw storage.GetConfig
+// primitive the G3 port retired: WorkspaceConfig.GetSetting answers an unset
+// key as "" with a nil error (never beads.ErrConfigNotFound or similar), the
+// same contract the raw primitive gave every one of this function's three
+// call sites, so this is a direct substitution rather than a behavior change.
+func nativeReadIssuePrefix(ctx context.Context, storage beadslib.Storage) (string, error) {
+	settings, err := storage.WorkspaceConfig()
+	if err != nil {
+		return "", err
+	}
+	result, err := settings.GetSetting(ctx, issueops.GetSettingRequest{Key: nativeIssuePrefixConfigKey})
+	if err != nil {
+		return "", err
+	}
+	return result.Value, nil
+}
+
 // openNativeStorage projects the scoped Dolt env, opens the best-available
 // native storage, and (when readPrefix) reads the configured issue prefix while
 // the env is still projected. It is shared by the initial open and the
@@ -669,7 +688,7 @@ func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot strin
 	}
 	var prefix string
 	if readPrefix {
-		prefix, err = storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
+		prefix, err = nativeReadIssuePrefix(ctx, storage)
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
@@ -1181,6 +1200,36 @@ func (s *NativeDoltStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPl
 
 // ApplyGraphPlanWithStorage creates a bead graph atomically in the selected
 // storage tier through the native beads storage layer.
+//
+// At or under issueops.MaxApplyBatchItems, it composes the whole plan into
+// ONE issueops.BatchApplier request — never chunked, because this route's
+// entire value over a sequence of ordinary writes is that it lands as a
+// single transaction. BatchApplier's own end gate re-validates every dep_add
+// item against the parent-child closure the whole request produced after
+// every item lands, raising *issueops.DependencyHierarchyConflictError or
+// issueops.ErrDependencyCycle.
+//
+// issueops.MaxApplyBatchItems is BatchApplier's own cap, not a wire limit, so
+// it binds a local (embedded) backend exactly as it binds a served one. A
+// plan over the cap therefore cannot go through BatchApplier at all, on any
+// backend — but a LOCAL backend still has a second atomic route: its own
+// beadslib.RunInTransaction, which this method drives by hand
+// (applyGraphPlanOverCapInTransaction) exactly as the pre-BatchApplier
+// implementation did. A served backend has no transaction to retry against —
+// RunInTransaction refuses it with a typed *beadslib.ErrUnsupported before the
+// callback ever runs — and that refusal is where *GraphApplyTooLargeError
+// belongs: there genuinely is no atomic path left for a plan this large on
+// that backend.
+//
+// The two routes do NOT refuse alike. The split counts the composed request's
+// items (creates, edges, parent links and deferred assignments together), not
+// nodes, so whether a plan is batch-sized depends on its whole shape. A
+// hierarchy conflict on the batch route is the role's typed
+// *issueops.DependencyHierarchyConflictError or issueops.ErrDependencyCycle.
+// On the over-cap route it is an untyped error from
+// applyGraphPlanOverCapInTransaction's pairwise parent/edge check, or whatever
+// the transaction's own dependency write raises. A caller cannot classify a
+// refused plan by those types without knowing which side of the cap it fell on.
 func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan *GraphApplyPlan, storageClass StorageClass) (*GraphApplyResult, error) {
 	if err := s.readOnlyGuard(); err != nil {
 		return nil, err
@@ -1196,6 +1245,11 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
 
+	req, err := nativeGraphApplyBatchRequest(plan, s.actor, ephemeral, noHistory)
+	if err != nil {
+		return nil, fmt.Errorf("native graph apply: %w", err)
+	}
+
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return nil, err
@@ -1208,13 +1262,61 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 	ctx, cancel := context.WithTimeout(parent, nativeGraphApplyDeadline(plan))
 	defer cancel()
 
+	if len(req.Items) <= issueops.MaxApplyBatchItems {
+		applier, err := storage.BatchApplier()
+		if err != nil {
+			return nil, fmt.Errorf("native graph apply: %w", err)
+		}
+		applyResult, err := applier.ApplyBatch(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("native graph apply: %w", err)
+		}
+		result := &GraphApplyResult{IDs: applyResult.Keys}
+		if err := ValidateGraphApplyResult(plan, result); err != nil {
+			return nil, fmt.Errorf("native graph apply: %w", err)
+		}
+		return result, nil
+	}
+
+	result, entered, err := s.applyGraphPlanOverCapInTransaction(ctx, storage, plan, ephemeral, noHistory)
+	if err == nil {
+		if verr := ValidateGraphApplyResult(plan, result); verr != nil {
+			return nil, fmt.Errorf("native graph apply: %w", verr)
+		}
+		return result, nil
+	}
+	var unsupported *beadslib.ErrUnsupported
+	if !entered && errors.As(err, &unsupported) {
+		// No transaction was ever opened — ask, don't handshake — so this
+		// backend has no atomic route left for a plan this large at all.
+		return nil, fmt.Errorf("native graph apply: %w", &GraphApplyTooLargeError{Items: len(req.Items), Max: issueops.MaxApplyBatchItems})
+	}
+	return nil, fmt.Errorf("native graph apply: %w", err)
+}
+
+// applyGraphPlanOverCapInTransaction is the over-cap fallback for a LOCAL
+// (embedded) backend: it drives the same plan by hand through
+// beadslib.RunInTransaction instead of issueops.BatchApplier, exactly as this
+// store did before the at-or-under-cap path moved onto BatchApplier. Every
+// tx.* call below is a LOCAL FALLBACK call: it lives only on this route,
+// reached only after BatchApplier's own cap has already ruled out the batch
+// path for this plan.
+//
+// entered reports whether the RunInTransaction callback ran at all, the same
+// distinction Tx() draws: a refusal raised AFTER the callback ran is a FAILED
+// transaction (the callback may have partially written), never a signal that
+// this backend lacks transactions; only a refusal raised before entry means
+// "no transaction route here."
+func (s *NativeDoltStore) applyGraphPlanOverCapInTransaction(ctx context.Context, storage beadslib.Storage, plan *GraphApplyPlan, ephemeral, noHistory bool) (result *GraphApplyResult, entered bool, err error) {
 	keyToID := make(map[string]string, len(plan.Nodes))
 	commitMsg := plan.CommitMessage
 	if commitMsg == "" {
 		commitMsg = fmt.Sprintf("gc: graph-apply %d nodes", len(plan.Nodes))
 	}
 
-	if err := storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+	err = storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+		entered = true
+
 		issues := make([]*beadslib.Issue, 0, len(plan.Nodes))
 		pendingAssignees := make(map[int]string)
 
@@ -1253,6 +1355,9 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 			issues = append(issues, issue)
 		}
 
+		// local fallback: tx.CreateIssues mints every id for this transaction
+		// in one call, bypassing issueops.BatchApplier entirely (its CreateItem
+		// is what this route exists to avoid).
 		if err := tx.CreateIssues(ctx, issues, s.actor); err != nil {
 			return fmt.Errorf("batch create: %w", err)
 		}
@@ -1272,6 +1377,10 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 			if err != nil {
 				return fmt.Errorf("node %q: marshaling updated metadata: %w", node.Key, err)
 			}
+			// local fallback: the map-based tx.UpdateIssue splices resolved
+			// metadata refs the same way the native route always has; it skips
+			// the role's metadata-key validation on purpose, the same documented
+			// asymmetry Tx() relies on (TestNativeDoltStoreMetadataKeyRuleSplitsByRoute).
 			if err := tx.UpdateIssue(ctx, issues[i].ID, map[string]interface{}{"metadata": raw}, s.actor); err != nil {
 				return fmt.Errorf("node %q: updating metadata refs: %w", node.Key, err)
 			}
@@ -1297,6 +1406,10 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 				Type:        depType,
 				Metadata:    edge.Metadata,
 			}
+			// local fallback: tx.AddDependency, the pre-BatchApplier route's own
+			// end gate — the manual parentDepPairs check above is this route's
+			// substitute for BatchApplier's hierarchy-closure re-validation,
+			// since nothing else re-checks a hand-run transaction's edges.
 			if err := tx.AddDependency(ctx, dep, s.actor); err != nil {
 				return fmt.Errorf("adding edge %s->%s: %w", fromID, toID, err)
 			}
@@ -1315,27 +1428,26 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 				DependsOnID: parentID,
 				Type:        beadslib.DepParentChild,
 			}
+			// local fallback: see tx.AddDependency comment above.
 			if err := tx.AddDependency(ctx, dep, s.actor); err != nil {
 				return fmt.Errorf("node %q: adding parent-child dep: %w", node.Key, err)
 			}
 		}
 
 		for i, assignee := range pendingAssignees {
+			// local fallback: deferred post-create assignment, in place of
+			// BatchApplier's UpdateItem pass over AssignAfterCreate nodes.
 			if err := tx.UpdateIssue(ctx, issues[i].ID, map[string]interface{}{"assignee": assignee}, s.actor); err != nil {
 				return fmt.Errorf("node %q: setting assignee: %w", plan.Nodes[i].Key, err)
 			}
 		}
 
 		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("native graph apply: %w", err)
+	})
+	if err != nil {
+		return nil, entered, err
 	}
-
-	result := &GraphApplyResult{IDs: keyToID}
-	if err := ValidateGraphApplyResult(plan, result); err != nil {
-		return nil, fmt.Errorf("native graph apply: %w", err)
-	}
-	return result, nil
+	return &GraphApplyResult{IDs: keyToID}, entered, nil
 }
 
 // SupportsEphemeralGraphApply reports whether this store can apply a whole
@@ -2067,12 +2179,13 @@ func (s *NativeDoltStore) Close(id string) error {
 // closeOnce performs one complete close attempt, read included, so a retry
 // decides from freshly read state instead of replaying a stale one.
 func (s *NativeDoltStore) closeOnce(ctx context.Context, storage beadslib.Storage, id string) error {
-	current, err := storage.GetIssue(ctx, id)
+	reader, err := storage.IssueReader()
 	if err != nil {
 		return nativeStoreError(id, err)
 	}
-	if current == nil {
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	current, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+	if err != nil {
+		return nativeReadNotFound(id, err)
 	}
 	// A replay re-reads, so a bead another actor closed during the backoff
 	// must not be closed again.
@@ -2089,7 +2202,7 @@ func (s *NativeDoltStore) closeOnce(ctx context.Context, storage beadslib.Storag
 	if _, err := ops.Close(ctx, issueops.CloseRequest{
 		Actor:   s.actor,
 		IssueID: id,
-		Reason:  nativeCloseReasonFromIssue(current),
+		Reason:  nativeCloseReasonFromIssue(&current.Issue),
 		Force:   true,
 	}); err != nil {
 		return nativeStoreError(id, err)
@@ -2119,12 +2232,13 @@ func (s *NativeDoltStore) Reopen(id string) error {
 // reopenOnce performs one complete reopen attempt, read included, so the
 // already-open short-circuit reflects the state this attempt observed.
 func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Storage, id string) error {
-	current, err := storage.GetIssue(ctx, id)
+	reader, err := storage.IssueReader()
 	if err != nil {
 		return nativeStoreError(id, err)
 	}
-	if current == nil {
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	current, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+	if err != nil {
+		return nativeReadNotFound(id, err)
 	}
 	if current.Status == beadslib.StatusOpen {
 		return nil
@@ -2283,14 +2397,15 @@ func (s *NativeDoltStore) stampAndClose(id string, metadata map[string]string) e
 	if closing == nil {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
-		current, err := storage.GetIssue(ctx, id)
+		reader, err := storage.IssueReader()
 		if err != nil {
 			return nativeStoreError(id, err)
 		}
-		if current == nil {
-			return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+		current, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+		if err != nil {
+			return nativeReadNotFound(id, err)
 		}
-		closing = current
+		closing = &current.Issue
 	}
 	// Force keeps the storage-layer close's policy-free semantics, exactly as
 	// Close does: a molecule root routinely closes with children still open.
@@ -2591,6 +2706,19 @@ func (s *NativeDoltStore) Tx(commitMsg string, fn func(Tx) error) error {
 	if strings.TrimSpace(commitMsg) == "" {
 		commitMsg = "gc: tx"
 	}
+	// RunInTransaction, not BatchApplier, has to stay the PRIMARY path: the
+	// native map-based tx.UpdateIssue this route runs skips the role's
+	// metadata-key validation on purpose
+	// (TestNativeDoltStoreMetadataKeyRuleSplitsByRoute pins this as a
+	// deliberate, if surprising, asymmetry against the validated
+	// Store.Update/SetMetadataBatch routes — Create and the map-based
+	// Store.Tx write accept a key every later standalone write refuses,
+	// which is why internal/dispatch drops such keys itself,
+	// beadmeta.CopyUserKeys). Trying issueops.BatchApplier's validated
+	// UpdateItem FIRST would silently tighten that contract for every
+	// backend that has a working native transaction, not just the served
+	// backend that genuinely needs the batch route. So BatchApplier stays
+	// the FALLBACK, reached only on this route's own refusal.
 	return runInNativeTransaction(ctx, storage, commitMsg, func(tx beadslib.Transaction) error {
 		return fn(&nativeDoltTx{store: s, ctx: ctx, tx: tx})
 	}, func() error {
@@ -2656,6 +2784,15 @@ type nativeIssueGetter interface {
 	GetIssue(context.Context, string) (*beadslib.Issue, error)
 }
 
+// nativeUpdates and validateUpdateParent below are called ONLY from
+// applyUpdateInTx (native_dolt_store.go), itself called only from
+// nativeDoltTx.Update inside Store.Tx's RunInTransaction callback -- grep
+// confirms no other call site hands either function a bare storage handle.
+// Their storage.GetIssue is therefore a TRANSACTION read, not a plain one:
+// local fallback, kept raw on purpose, because beadslib.Transaction (unlike
+// beadslib.Storage) publishes no role accessors at all -- no IssueReader(),
+// no IssueLifecycle() -- so there is no Reader.Get door open inside an open
+// transaction for either function to take instead.
 func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssueGetter, id string, opts UpdateOpts) (map[string]interface{}, error) {
 	updates := make(map[string]interface{})
 	if opts.Title != nil {
@@ -2702,6 +2839,10 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 // to agree here — a store that admits a cross-store parent and then refuses to
 // write the same value back is worse than one that refuses both, because the
 // refusal only appears on the reparent, long after the shape was accepted.
+//
+// Called only from applyUpdateInTx with tx as storage: see nativeUpdates'
+// doc comment just above for why that keeps this a local-fallback
+// transaction read rather than a Reader.Get port.
 func (s *NativeDoltStore) validateUpdateParent(ctx context.Context, storage nativeIssueGetter, id, parentID string) error {
 	if strings.TrimSpace(parentID) == "" {
 		return nil
@@ -2883,10 +3024,27 @@ func nativeGraphApplyDependencyType(depType string) beadslib.DependencyType {
 	return beadslib.DependencyType(depType)
 }
 
+// The four helpers below are used ONLY by
+// applyGraphPlanOverCapInTransaction, the over-cap local-backend fallback
+// that drives a graph-apply plan by hand through beadslib.RunInTransaction
+// instead of issueops.BatchApplier. BatchApplier re-validates every dep_add
+// item against the parent-child closure it builds itself once every item has
+// landed, raising *issueops.DependencyHierarchyConflictError or
+// issueops.ErrDependencyCycle; a hand-run transaction has no such end gate,
+// so this pairwise check is this route's own substitute for it.
+
+// nativeGraphApplyCycleRelevantDependencyType reports whether depType can
+// form a cycle with a parent-child edge the way DepBlocks and
+// DepConditionalBlocks can — the two ordering-sensitive types this pairwise
+// check cares about.
 func nativeGraphApplyCycleRelevantDependencyType(depType beadslib.DependencyType) bool {
 	return depType == beadslib.DepBlocks || depType == beadslib.DepConditionalBlocks
 }
 
+// nativeGraphApplyParentDepPairs collects every (child, parent) id pair this
+// plan's node-level ParentKey/ParentID links will create, keyed the same way
+// nativeGraphApplyDepPairKey keys an edge, so the edge loop below can detect a
+// plan edge that duplicates or reverses one of them.
 func nativeGraphApplyParentDepPairs(nodes []GraphApplyNode, keyToID map[string]string) map[string]bool {
 	pairs := make(map[string]bool)
 	for _, node := range nodes {
@@ -2902,10 +3060,16 @@ func nativeGraphApplyParentDepPairs(nodes []GraphApplyNode, keyToID map[string]s
 	return pairs
 }
 
+// nativeGraphApplyDepPairKey keys a directed (issueID, dependsOnID) pair for
+// nativeGraphApplyParentDepPairs' set.
 func nativeGraphApplyDepPairKey(issueID, dependsOnID string) string {
 	return issueID + "\x00" + dependsOnID
 }
 
+// nativeGraphApplyResolveRef resolves one edge endpoint to a concrete id,
+// preferring an explicit id over a key: an id names a row structurally
+// (possibly one outside this plan entirely, e.g. an "external:" reference),
+// while a key only ever reaches into this same plan's keyToID map.
 func nativeGraphApplyResolveRef(key, id string, keyToID map[string]string) string {
 	if id != "" {
 		return id
@@ -2914,6 +3078,150 @@ func nativeGraphApplyResolveRef(key, id string, keyToID map[string]string) strin
 		return keyToID[key]
 	}
 	return ""
+}
+
+// nativeGraphApplyRef resolves one edge endpoint to an issueops.Ref,
+// preferring an explicit id over a key exactly as the pre-BatchApplier
+// implementation's nativeGraphApplyResolveRef did: an id names a row
+// structurally (possibly one outside this plan entirely, e.g. an
+// "external:" reference), while a key only ever reaches into this same plan.
+func nativeGraphApplyRef(key, id string) issueops.Ref {
+	if id != "" {
+		return issueops.Ref{ID: id}
+	}
+	return issueops.Ref{Key: key}
+}
+
+// nativeGraphApplyParentRef resolves a node's parent link, when it has one,
+// preferring ParentKey over ParentID — the same precedence the
+// pre-BatchApplier implementation gave the two fields.
+func nativeGraphApplyParentRef(node GraphApplyNode) (issueops.Ref, bool) {
+	if node.ParentKey != "" {
+		return issueops.Ref{Key: node.ParentKey}, true
+	}
+	if node.ParentID != "" {
+		return issueops.Ref{ID: node.ParentID}, true
+	}
+	return issueops.Ref{}, false
+}
+
+// nativeGraphApplyBatchRequest builds the single issueops.ApplyBatchRequest a
+// graph-apply plan expands to. It is PURE — no storage, no context — so its
+// item count can be checked against issueops.MaxApplyBatchItems before any
+// backend is touched.
+//
+// Item order:
+//
+//  1. One CreateItem per node, in plan order, carrying MetadataRefs directly
+//     from node.MetadataRefs — the splice BatchApplier performs as its
+//     documented second write, in place of the manual tx.UpdateIssue
+//     metadata-ref pass this replaces.
+//  2. One DepAddItem per plan edge.
+//  3. One DepAddItem per node that names a parent, of type parent-child —
+//     PARENT-ON-CREATE's one spelling, in place of the old implicit
+//     node.ParentID/ParentKey handling.
+//  4. One UpdateItem per node with AssignAfterCreate set and a non-empty
+//     Assignee, patching Assignee — in place of the old deferred
+//     pendingAssignees pass.
+//
+// Every CreateItem precedes every item that can reference it by key, which is
+// what Ref's backward-only resolution requires; plan.Nodes' own relative
+// order among themselves does not matter for this, since ALL creates land
+// before any edge, parent link or assignment update regardless of which node
+// produced which.
+func nativeGraphApplyBatchRequest(plan *GraphApplyPlan, actor string, ephemeral, noHistory bool) (issueops.ApplyBatchRequest, error) {
+	items := make([]issueops.ApplyItem, 0, 2*len(plan.Nodes)+len(plan.Edges))
+
+	for _, node := range plan.Nodes {
+		metadata, err := metadataRawFromMap(node.Metadata)
+		if err != nil {
+			return issueops.ApplyBatchRequest{}, fmt.Errorf("node %q: marshaling metadata: %w", node.Key, err)
+		}
+		issueType := beadslib.IssueType(node.Type)
+		if issueType == "" {
+			issueType = beadslib.TypeTask
+		}
+		priority := 2
+		if node.Priority != nil {
+			priority = *node.Priority
+		}
+		issue := &issueops.Issue{
+			Title:       node.Title,
+			Description: node.Description,
+			Status:      beadslib.StatusOpen,
+			Priority:    priority,
+			IssueType:   issueType,
+			Sender:      node.From,
+			Labels:      append([]string(nil), node.Labels...),
+			Metadata:    metadata,
+			Ephemeral:   ephemeral,
+			NoHistory:   noHistory,
+		}
+		if node.Assignee != "" && !node.AssignAfterCreate {
+			issue.Assignee = node.Assignee
+		}
+
+		create := &issueops.CreateItem{Key: node.Key, Issue: issue}
+		if len(node.MetadataRefs) > 0 {
+			refs := make(map[string]issueops.Ref, len(node.MetadataRefs))
+			for metaKey, refKey := range node.MetadataRefs {
+				refs[metaKey] = issueops.Ref{Key: refKey}
+			}
+			create.MetadataRefs = refs
+		}
+		items = append(items, issueops.ApplyItem{Kind: issueops.ItemCreate, Create: create})
+	}
+
+	for _, edge := range plan.Edges {
+		items = append(items, issueops.ApplyItem{
+			Kind: issueops.ItemDepAdd,
+			DepAdd: &issueops.DepAddItem{
+				Source:   nativeGraphApplyRef(edge.FromKey, edge.FromID),
+				Target:   nativeGraphApplyRef(edge.ToKey, edge.ToID),
+				Type:     nativeGraphApplyDependencyType(edge.Type),
+				Metadata: edge.Metadata,
+			},
+		})
+	}
+
+	for _, node := range plan.Nodes {
+		parentRef, ok := nativeGraphApplyParentRef(node)
+		if !ok {
+			continue
+		}
+		items = append(items, issueops.ApplyItem{
+			Kind: issueops.ItemDepAdd,
+			DepAdd: &issueops.DepAddItem{
+				Source: issueops.Ref{Key: node.Key},
+				Target: parentRef,
+				Type:   beadslib.DepParentChild,
+			},
+		})
+	}
+
+	for _, node := range plan.Nodes {
+		if !node.AssignAfterCreate || node.Assignee == "" {
+			continue
+		}
+		items = append(items, issueops.ApplyItem{
+			Kind: issueops.ItemUpdate,
+			Update: &issueops.UpdateItem{
+				Target: issueops.Ref{Key: node.Key},
+				Patch:  issueops.IssuePatch{Assignee: issueops.Field[string]{Set: true, Value: node.Assignee}},
+			},
+		})
+	}
+
+	provenance := plan.CommitMessage
+	if provenance == "" {
+		provenance = fmt.Sprintf("gc: graph-apply %d nodes", len(plan.Nodes))
+	}
+
+	return issueops.ApplyBatchRequest{
+		Actor:      actor,
+		Items:      items,
+		Provenance: provenance,
+	}, nil
 }
 
 func cloneNativeDependencies(deps []*beadslib.Dependency) []*beadslib.Dependency {
