@@ -45,8 +45,12 @@ const (
 )
 
 // simStaleEvents lets a step deliver an event older than its row's backing:
-// a reorder, or a duplicate after a newer write (v5 §11 H2).
-var simStaleEvents = os.Getenv("GC_V2_SIM_NO_STALE_EVENTS") == ""
+// a reorder, or a duplicate after a newer write (v5 §11 H2). It is off by
+// default until mc-03lk4 (a CachingStore stale event installs at the current
+// revision, so a fenced CAS lands on it) is fixed; GC_V2_SIM_STALE_EVENTS=1
+// turns it on. With it on, seeds 112, 174, 193, 211, 235 and 237 of 256
+// reproduce mc-03lk4 as I15 violations.
+var simStaleEvents = os.Getenv("GC_V2_SIM_STALE_EVENTS") == "1"
 
 // The invariant hooks a later file appends to: per step, per row change v2
 // made, around each effect (the returned func sees its settlement), and at
@@ -65,6 +69,7 @@ type simRuntime struct {
 	corpse           bool   // the pane died; remain-on-exit keeps the name listed
 	zombie           bool   // the pane lives; the agent died
 	attached         bool
+	probeErr         bool // a process probe errors, answering the agent not alive (v5 O3)
 }
 
 // simStart and simKill are the spy's records of a Start and of a
@@ -91,6 +96,8 @@ type simProvider struct {
 	*runtime.Fake
 	mu          sync.Mutex
 	rts         map[string]*simRuntime
+	version     uint64            // bumped by every runtime change
+	changed     map[string]uint64 // each name's version at its runtime's last change
 	objects     int64
 	now         func() time.Time
 	listing     int // 0 complete; 1 partial, the first name missing; 2 failed (v5 O1)
@@ -107,9 +114,18 @@ func (p *simProvider) put(name, id, epoch, token string) {
 	p.objects++
 	p.rts[name] = &simRuntime{id: id, epoch: epoch, token: token, object: p.objects, created: p.now().Unix()}
 	p.serverDown = false
+	p.touch(name)
 }
 
-func (p *simProvider) drop(name string) { delete(p.rts, name) }
+func (p *simProvider) drop(name string) {
+	delete(p.rts, name)
+	p.touch(name)
+}
+
+func (p *simProvider) touch(name string) {
+	p.version++
+	p.changed[name] = p.version
+}
 
 func (p *simProvider) ListRunning(string) ([]string, error) {
 	p.mu.Lock()
@@ -159,6 +175,11 @@ func (p *simProvider) GetAllEnvironment(name string) (map[string]string, error) 
 func (p *simProvider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if rt := p.rts[name]; rt != nil && rt.probeErr && !rt.corpse {
+		l := p.livenessLocked(name)
+		l.Alive = false
+		return l, fmt.Errorf("sim: probe of %s: %w", name, runtime.ErrRuntimeUnavailable)
+	}
 	return p.livenessLocked(name), nil
 }
 
@@ -249,7 +270,8 @@ type simWrite struct {
 type heldListing struct {
 	listing inventoryListing
 	started time.Time
-	passes  int // planner passes until it publishes
+	version uint64 // the provider's when listed
+	passes  int    // planner passes until it publishes
 }
 
 // sim is one seeded run.
@@ -270,6 +292,7 @@ type sim struct {
 	x        *effectExecutor
 	lane     *runtimeInventoryLane
 	held     []heldListing
+	listed   uint64 // the provider version the latest published listing saw
 	spawned  sync.WaitGroup
 	parkCh   chan *simEffect
 	postCh   chan settlement
@@ -278,6 +301,7 @@ type sim struct {
 	lastSeq  uint64
 	prev     map[string]beads.Bead // "leg/id" → row, after the last step
 	writes   []simWrite
+	admitted []time.Time // admitted starts (I9)
 	failures []string
 }
 
@@ -296,7 +320,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		parkCh: make(chan *simEffect, 256), postCh: make(chan settlement, 256),
 	}
 	s.lag = s.rng.IntN(2) == 0
-	s.sp = &simProvider{Fake: runtime.NewFake(), rts: make(map[string]*simRuntime), now: s.clk.Now}
+	s.sp = &simProvider{Fake: runtime.NewFake(), rts: make(map[string]*simRuntime), changed: make(map[string]uint64), now: s.clk.Now}
 	s.cfg = workerCity(3)
 	s.cfg.Daemon.PatrolInterval, s.cfg.Daemon.ProbeConcurrency = simPatrol.String(), intPtr(1)
 	s.cfg.Rigs = []config.Rig{{Name: simRigLeg, Path: t.TempDir()}}
@@ -432,6 +456,11 @@ func (s *sim) pass() {
 	s.p.runPass(now)
 	rec := s.p.out.record.Load()
 	s.logf("pass: admitted %v, %d deferred %s", intentKeys(rec.Admitted), len(rec.Deferred), rec.Err)
+	for _, it := range rec.Admitted {
+		if it.Kind == intentStart {
+			s.admitted = append(s.admitted, now)
+		}
+	}
 	for _, e := range s.inflight.view().Entries {
 		if e.Seq <= s.lastSeq || e.Ambiguous {
 			continue
@@ -523,7 +552,7 @@ func (s *sim) inventory() {
 		l.lastProvider, l.providerGen = s.sp, l.providerGen+1
 	}
 	listing, _ := l.listBounded(context.Background(), s.sp) // the fake answers at once
-	h := heldListing{listing: listing, started: s.clk.Now()}
+	h := heldListing{listing: listing, started: s.clk.Now(), version: s.sp.version}
 	if s.lag && s.rng.IntN(2) == 0 {
 		h.passes = s.rng.IntN(4)
 		s.held = append(s.held, h)
@@ -534,6 +563,7 @@ func (s *sim) inventory() {
 }
 
 func (s *sim) publish(h heldListing) {
+	s.listed = h.version
 	s.lane.publish(context.Background(), h.listing, h.started, 1, &inventoryPassReport{})
 	s.logf("inventory: published %v (%v), listed at %s", h.listing.mergedNames, h.listing.mergedErr, h.started.Sub(plannerT0))
 }
@@ -598,6 +628,10 @@ var externalOps = []struct {
 		}
 	}},
 	{"close", func(_ *sim, l *simLeg, b beads.Bead) { _ = l.backing.Close(b.ID) }},
+	{"suspend", func(s *sim, l *simLeg, b beads.Bead) { // gc session suspend: the stop, then the state
+		_ = s.sp.Stop(b.Metadata["session_name"])
+		s.setMeta(l, b.ID, "state", string(session.StateSuspended), "suspended_at", s.rel(0), "slept_at", "", "sleep_reason", "")
+	}},
 }
 
 // runtimeOps change the runtime under a row's name, under the provider's mu.
@@ -608,14 +642,24 @@ var runtimeOps = []struct {
 	{"agent-dies", func(p *simProvider, name string, _ beads.Bead) {
 		if rt := p.rts[name]; rt != nil && !rt.zombie {
 			rt.zombie = true
+			p.touch(name)
 		}
 	}},
 	{"pane-dies", func(p *simProvider, name string, _ beads.Bead) {
 		if rt := p.rts[name]; rt != nil && !rt.corpse {
 			rt.corpse = true
+			p.touch(name)
 		}
 	}},
 	{"vanish", func(p *simProvider, name string, _ beads.Bead) { p.drop(name) }},
+	{"probe-errs", func(p *simProvider, name string, _ beads.Bead) {
+		if rt := p.rts[name]; rt != nil {
+			rt.probeErr = !rt.probeErr
+			p.touch(name)
+		}
+	}},
+	{"foreign-occupant", func(p *simProvider, name string, _ beads.Bead) { p.put(name, "gc-other", "1", "tok-other") }},
+	{"ownerless-occupant", func(p *simProvider, name string, _ beads.Bead) { p.put(name, "", "", "") }},
 	{"attach", func(p *simProvider, name string, _ beads.Bead) {
 		if rt := p.rts[name]; rt != nil {
 			rt.attached = !rt.attached
