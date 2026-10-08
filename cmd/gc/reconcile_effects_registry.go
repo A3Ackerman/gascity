@@ -26,6 +26,12 @@ type effectPass struct {
 	Runtime runtime.Provider
 	World   *World
 	Alloc   *allocDecision
+	// create is what the pass hands its creates, raw stores included: a
+	// create's guarded row write is v5 R1's exception 1 (§13), and only
+	// createEffect reads it. creates runs them. The planner sets both, the
+	// first on its first admitted create (planner.submit).
+	create  *createPass
+	creates *createEffects
 }
 
 // newEffectPass is w's and a's effectPass.
@@ -39,6 +45,7 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	}
 	stripped := *w
 	stripped.LegStores, stripped.Demand.AssignedStores = nil, nil
+	stripped.SessionsStore, stripped.RigStores = nil, nil
 	if w.Env != nil {
 		env := *w.Env
 		env.SP = nil
@@ -53,4 +60,5 @@ type effectBuilder func(p *effectPass, it intent) func(context.Context) settleme
 
 var effectRegistry = map[string]effectBuilder{
 	intentRowHeal: rowWriteEffect, // A6
+	intentCreate:  createEffect,   // C1, C2
 }
