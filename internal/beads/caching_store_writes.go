@@ -250,6 +250,72 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	return true, nil
 }
 
+// Claim claims id for assignee through the backing store's two-argument
+// compare-and-swap claim and writes the claimed row through to the cache. A
+// conflict (ok=false, nil error) and any error pass straight through without
+// touching the cache, as ReleaseIfCurrent's refusals do.
+//
+// The backing claim answers with the bare post-claim row: labels, dependency
+// records and comments stripped (see NativeDoltStore.Claim). Installing it
+// would replace the cached row wholesale and drop those fields, so Claim
+// refreshes the full row from the backing store's Get and installs that. When
+// the refresh fails, only what a claim changes (status, assignee and the
+// update time) is merged onto the cached row, which is marked dirty; with no
+// cached row, the bare row is installed as a dirty placeholder, because this
+// process has not confirmed its labels, dependencies or comments. Every branch
+// keeps the cached dependency edges (depsKeepCached): a claim never changes
+// them.
+//
+// Like every other writer, Claim installs nothing when a local write or Delete
+// on id landed after the claim began (racedWriteLocked): that write's row, or
+// its tombstone, stands. The claim committed either way, so its row is still
+// notified and returned.
+func (c *CachingStore) Claim(id, assignee string) (Bead, bool, error) {
+	claimer, ok := c.backing.(interface {
+		Claim(id, assignee string) (Bead, bool, error)
+	})
+	if !ok {
+		return Bead{}, false, ErrClaimUnsupported
+	}
+	startSeq := c.currentMutationSeq()
+	claimed, acquired, err := claimer.Claim(id, assignee)
+	if err != nil || !acquired {
+		return claimed, acquired, err
+	}
+
+	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after claim")
+	c.mu.Lock()
+	raced := c.racedWriteLocked(id, startSeq)
+	row, found := fresh, refreshed
+	if !refreshed {
+		row, found = c.patchedCachedRowLocked(id, func(b *Bead) {
+			setBeadStatus(b, claimed.Status)
+			b.Assignee = claimed.Assignee
+			b.UpdatedAt = claimed.UpdatedAt
+		})
+	}
+	if !found {
+		row = claimed
+	}
+	if !raced {
+		c.noteLocalMutationLocked(id)
+		c.absorbFreshLocked(id, row, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: refreshed,
+		})
+		if !refreshed {
+			c.markDirtyLocked(id)
+		}
+		c.clearDependentReadyProjectionsLocked(id)
+		c.markFreshLocked(time.Now())
+	}
+	c.updateStatsLocked()
+	c.mu.Unlock()
+	c.notifyChange(ChangeLocal, "bead.updated", row)
+	return row, true, nil
+}
+
 // Close marks a bead as closed in the backing store and cache.
 func (c *CachingStore) Close(id string) error {
 	// Idempotence: if the cached bead status is already "closed" AND the
