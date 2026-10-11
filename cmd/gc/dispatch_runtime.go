@@ -43,7 +43,7 @@ var (
 	workflowServeList               = nextWorkflowServeBeads
 	controlDispatcherServe          = runControlDispatcherInStore
 	workflowServeOpenEventsProvider = func(stderr io.Writer) (events.Provider, error) {
-		ep, code := openCityEventsProvider(stderr, "gc convoy control --serve")
+		ep, code := openCityEventsReader(stderr, "gc convoy control --serve")
 		if ep == nil {
 			return nil, fmt.Errorf("opening events provider (exit %d)", code)
 		}
@@ -429,9 +429,16 @@ type workflowServeDrainResult struct {
 func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
 	result := workflowServeDrainResult{}
 	idlePolls := 0
+	emits := newExecutionEmitDeferral(cityPath, storePath, stderr)
+	defer emits.flush()
 	for {
 		serveQuery := workflowServeWorkQuery(agentCfg, workQuery)
 		queue, err := workflowServeList(serveQuery, storePath, workEnv)
+		if err == nil {
+			// Project every processed root whose controls have stopped
+			// arriving; a root with a control in this queue waits for it.
+			emits.flushSettled(queue)
+		}
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
 			// Surface a killed/timed-out control work query on the event
@@ -467,9 +474,23 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			// control ga-fw2fm. The silent no-op now emits a separate
 			// `process-control ... skip reason=bead_not_open` line inside
 			// ProcessControl itself; see runtime.go.
-			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr); err != nil {
+			callsBefore, started := snapshotControlBdCalls(), time.Now()
+			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr, emits); err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
+					// Same rule as the transient arm below: a pending bead
+					// repeating its previous refusal verbatim is still retried
+					// every sweep, but it must not count as activity. Pending
+					// waits on config/state drift a human heals, so it can last
+					// days — and a bead that resets idleSweeps on every one of
+					// them holds the whole serve loop at its 1s floor for the
+					// duration, re-running a full dispatch (config load, store
+					// open, outcome read, source-chain preflight) five times per
+					// idle-cap interval to re-learn the same answer.
+					if dispatch.IsQuietControllerRetry(err) {
+						workflowTracef("serve pending-quiet bead=%s kind=%s", beadID, kind)
+						continue
+					}
 					result.pendingAny = true
 					workflowTracef("serve pending bead=%s kind=%s", beadID, kind)
 					continue
@@ -494,7 +515,8 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				}
 				return result, fmt.Errorf("processing control bead %s: %w", beadID, err)
 			}
-			workflowTracef("serve processed bead=%s kind=%s", beadID, kind)
+			calls := snapshotControlBdCalls().since(callsBefore)
+			workflowTracef("serve processed bead=%s kind=%s bd_reads=%d bd_writes=%d dur=%s", beadID, kind, calls.reads, calls.writes, time.Since(started).Round(time.Millisecond))
 			result.processedAny = true
 			processedThisCycle = true
 		}
@@ -927,7 +949,7 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 	if workQuery == "" {
 		return nil, nil
 	}
-	if queue, handled, err := tryControlReadyFromCacheOrFallback(workQuery, dir, env); handled {
+	if queue, handled, err := tryControlReadyScan(workQuery, dir, env); handled {
 		return queue, err
 	}
 	output, err := shellWorkQueryWithEnv(workQuery, dir, mergeRuntimeEnv(os.Environ(), env))

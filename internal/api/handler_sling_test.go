@@ -640,6 +640,22 @@ func TestSlingSlotSuffixedPoolTargetNormalizesRoutedTo(t *testing.T) {
 	}
 }
 
+// lockGraphV2SlingFlagsForTest holds the process-global formula_v2 and
+// graph-apply flags for the rest of the test and returns a func that turns
+// both on. Call the returned func only after the server under test is built:
+// New() runs syncFeatureFlags, which would otherwise stomp the flags back to
+// the fake config's defaults. Both flags are restored during cleanup.
+func lockGraphV2SlingFlagsForTest(t *testing.T) (enable func()) {
+	t.Helper()
+	setFormulaV2 := formulatest.LockV2ForTest(t)
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+	return func() {
+		setFormulaV2(true)
+		molecule.SetGraphApplyEnabled(true)
+	}
+}
+
 func TestSlingGraphV2RejectsLegacySourceWorkflowConflict(t *testing.T) {
 	// The Huma migration moved sling to /v0/city/{cityName}/sling and
 	// replaced the old plain-JSON `{code, message, source_bead_id, ...}`
@@ -658,15 +674,10 @@ func TestSlingGraphV2RejectsLegacySourceWorkflowConflict(t *testing.T) {
 	//      shared formulatest guard and flips it to true AFTER
 	//      newSlingTestServer so New()'s syncFeatureFlags doesn't stomp it
 	//      back to false.
-	setFormulaV2 := formulatest.LockV2ForTest(t)
-	prevGraphApply := molecule.IsGraphApplyEnabled()
-	t.Cleanup(func() {
-		molecule.SetGraphApplyEnabled(prevGraphApply)
-	})
+	enableGraphV2 := lockGraphV2SlingFlagsForTest(t)
 
 	srv, state := newSlingTestServer(t)
-	setFormulaV2(true)
-	molecule.SetGraphApplyEnabled(true)
+	enableGraphV2()
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 	state.cfg.Agents = append(state.cfg.Agents,
@@ -1329,6 +1340,63 @@ func TestSlingAdmitsWhenGraphBindingRootIsClosed(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (a closed binding root is not a live conflict); body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status     string `json:"status"`
+		WorkflowID string `json:"workflow_id"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "slung" || resp.WorkflowID == "" {
+		t.Fatalf("response = %+v, want a slung launch with a workflow id", resp)
+	}
+}
+
+// TestSlingAdmitsWhenAClosedBindingRootSupersedesItsRetainedTwin is ga-x5lpj at
+// the API door. A storage migration copies rows into the binding and deletes
+// nothing, so a converged city's work ledger still holds an OPEN frozen twin of
+// every relocated root. Once the binding's row is CLOSED, the live-root scan
+// stops returning it and the twin was the only row the guard saw — refusing a
+// sling whose only live root is gone. The same store list feeds both doors, so
+// this row proves the wiring, not a second copy of the collector's matrix.
+func TestSlingAdmitsWhenAClosedBindingRootSupersedesItsRetainedTwin(t *testing.T) {
+	srv, state, source := newGraphBindingSlingFixture(t)
+	graph := beads.NewMemStore()
+	state.graphBeadStore = graph
+	root := seedBindingResidentWorkflowRoot(t, graph, source.ID)
+	if _, err := graph.CloseAll([]string{root.ID}, map[string]string{
+		"close_reason": "the relocated workflow finished before this sling",
+	}); err != nil {
+		t.Fatalf("CloseAll(%s): %v", root.ID, err)
+	}
+	work := beads.NewMemStore()
+	work.HonorExplicitIDs = true
+	state.cityBeadStore = work
+	twin, err := work.Create(beads.Bead{
+		ID:     root.ID,
+		Title:  "retained copy of the relocated workflow root",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.SourceBeadIDMetadataKey:    source.ID,
+			beadmeta.SourceStoreRefMetadataKey:  "rig:myrig",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(retained twin): %v", err)
+	}
+	if twin.ID != root.ID {
+		t.Fatalf("retained twin minted %s, want the relocated root's id %s", twin.ID, root.ID)
+	}
+
+	rec := postGraphSling(t, srv, state, source.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: the binding closed %s, so the retained twin is not a live conflict; body = %s",
+			rec.Code, root.ID, rec.Body.String())
 	}
 	var resp struct {
 		Status     string `json:"status"`

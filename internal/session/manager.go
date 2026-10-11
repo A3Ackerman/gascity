@@ -19,8 +19,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // State represents the runtime state of a chat session.
@@ -171,12 +173,9 @@ type Info struct {
 	// RAW priming-marker mirrors (primed_at / priming_attempted_at / prompt_hash),
 	// verbatim. They follow the same raw-mirror house pattern as the canonical
 	// keys: projected by infoFromPersistedBead and folded per-key (verbatim copy)
-	// by ApplyPatch. The S19 Stage 3 shadow harness snapshots the compared keys
-	// off these Info mirrors at tick start/end (the reconciler loop carries no raw
-	// session beads), so every compared key must be a projected Info field.
-	// Additive, internal-only (absent from the HTTP wire). S19 Stage 2 is
-	// WRITE-ONLY: stamped/cleared at start/clear sites but read by no decision
-	// path yet (the harness observes them; Stage 4 acts on them).
+	// by ApplyPatch. Additive, internal-only (absent from the HTTP wire). S19
+	// Stage 2 is WRITE-ONLY: stamped/cleared at start/clear sites but read by no
+	// decision path yet.
 	PrimedAtMetadata           string // primed_at (raw RFC3339)
 	PrimingAttemptedAtMetadata string // priming_attempted_at (raw RFC3339)
 	PromptHashMetadata         string // prompt_hash (raw sha256 hex)
@@ -281,6 +280,10 @@ type Info struct {
 	// clearing last_woke_at, so a same-tick sleep/drain-ack falls back to this
 	// instead of collapsing straight to CreatedAt (#2574).
 	SleptAt string // slept_at (raw)
+	// SuspendedAt is the RAW suspended_at metadata (RFC3339 or empty), stamped
+	// by a suspend. The process-table orphan sweep reads it, after SleptAt, as
+	// the row's last stop.
+	SuspendedAt string // suspended_at (raw)
 	// AwakeStartedAt is the RAW awake_started_at metadata (RFC3339 or empty):
 	// the immutable start-of-awake-interval epoch that survives sleep/drain
 	// teardowns (unlike last_woke_at / pending_create_started_at, which are
@@ -358,9 +361,22 @@ type Info struct {
 	// reads it BOTH via strconv.Atoi (numeric threshold) AND as == "" / == "0"
 	// (clear/first-increment gates), so the mirror keeps the raw string.
 	ChurnCount string // churn_count (raw)
+	// IdleRespawnAttempts is the RAW idle_respawn_attempts metadata. The
+	// reconciler bounds idle-respawn retries for one assigned bead with it.
+	IdleRespawnAttempts string // idle_respawn_attempts (raw)
+	// IdleRespawnBeadID identifies the assigned bead the retry count belongs to.
+	IdleRespawnBeadID string // idle_respawn_bead_id (raw)
 	// WakeMode is the RAW wake_mode metadata. The wake and drain-finalize paths
 	// branch on an exact == "fresh" compare.
 	WakeMode string // wake_mode (raw)
+	// DrainAt is the RAW drain_at metadata (RFC3339 or empty): the durable
+	// instant BeginDrainPatch stamped when the session entered drain. It
+	// survives the draining → drained transition (AcknowledgeDrainPatch does
+	// not clear it), so it is the only persistent clock for how long a seat has
+	// been in drain — the in-memory drainTracker resets on every controller
+	// restart. The pool-slot retire deadline parses it; an empty or
+	// unparseable value fails closed (no forced retirement).
+	DrainAt string // drain_at (raw RFC3339)
 	// SleepIntent is the RAW sleep_intent metadata. The sleep-intent branch reads
 	// it as != "" and == "idle-stop-pending".
 	SleepIntent string // sleep_intent (raw)
@@ -375,6 +391,10 @@ type Info struct {
 	// (CurrentBeadIDKey). compute_awake_bridge maps it (trimmed) onto
 	// LifecycleInput.CurrentlyProcessingBeadID.
 	CurrentlyProcessingBeadID string // currently_processing_bead_id (raw)
+	// CurrentClaimBeadID is the RAW current_claim_bead_id metadata
+	// (beadmeta.CurrentClaimBeadIDMetadataKey): the work the session claimed
+	// for itself (SetCurrentClaim), which CurrentClaimBeadID reads live.
+	CurrentClaimBeadID string // current_claim_bead_id (raw)
 	// CoreHashBreakdown is the RAW core_hash_breakdown metadata (a JSON blob). The
 	// config-drift path feeds it verbatim to runtime.CoreFingerprintDriftFieldsFromJSON
 	// / LogCoreFingerprintDrift for the drift trace payload; the mirror keeps the
@@ -433,6 +453,11 @@ type Info struct {
 	// explicit-wake cause. Mirror keeps the raw value so a typed LifecycleInput can
 	// be populated from Info without touching the bead.
 	WakeRequest string // wake_request (raw)
+	// WakeRequestedAt is the RAW wake_requested_at metadata (RFC3339 or empty),
+	// stamped with wake_request. The reconciler compares it against SleptAt to
+	// tell a still-pending explicit wake from one an earlier awake interval
+	// already served (PreWakePatch clears the pair only at a start).
+	WakeRequestedAt string // wake_requested_at (raw)
 	// RestartRequested is the RAW restart_requested metadata, the §5.2 intra-tick
 	// restart marker compute_awake_bridge reads (trimmed == "true") to surface a
 	// pending restart on the awake scan. Under raw-refresh coexistence the mirror
@@ -521,6 +546,11 @@ type RuntimeObservation struct {
 	Attached    bool
 	LastActive  time.Time
 	SessionName string
+
+	// AttachedErr is set when the attachment probe could not tell (any error
+	// other than runtime.ErrSessionNotFound); Attached is false then. A caller
+	// gating a destructive action treats it as attached.
+	AttachedErr error
 }
 
 func normalizeInfoState(state State) State {
@@ -705,13 +735,13 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // replacement is impossible because it does not exist yet.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
-	scanner, ok := m.sp.(runtime.ProcessTableScanner)
+	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
 		return nil
 	}
 	found, err := scanner.FindRuntimesBySessionID(sessionID)
 	if err != nil {
-		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %v", sessionID, err)
+		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	var termErrs []error
@@ -720,6 +750,15 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 			continue
 		}
 		if cityPath != "" && pathutil.NormalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
+			continue
+		}
+		// A root carrying this session's identity may be city infrastructure
+		// that merely inherited it: a managed Dolt scope watchdog or bd's
+		// db-proxy-child started from this session's shell. Terminating it
+		// signals its process group and takes the city's Dolt server down
+		// (#6316), so a same-session restart must never reach it.
+		if proctable.IsCityInfrastructureRoot(live.PID) {
+			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
 		if err := scanner.TerminateRuntime(live); err != nil {
@@ -995,6 +1034,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		if gcProvider := ProviderFamilyFromMetadata(meta, provider); gcProvider != "" {
 			cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 		}
+		cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 		cfg = runtime.SyncWorkDirEnv(cfg)
 
 		// Start the runtime session. Refuse to start if a prior escaped process
@@ -1194,15 +1234,16 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 }
 
 // Attach attaches the user's terminal to the session. If the session is
-// suspended, it is resumed first using resumeCommand. If the tmux session
-// died (active bead but no process), it is restarted.
+// dormant, it is resumed first using resumeCommand, consuming the operator's
+// hold (ResumeOperator, CONTRACT v5.9 D8). If the tmux session died (active
+// bead but no process), it is restarted.
 func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, hints runtime.Config) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, ResumeOperator); err != nil {
 			return err
 		}
 
@@ -1210,8 +1251,39 @@ func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, h
 	})
 }
 
-// Suspend saves session state and kills the runtime session.
+// suspendIntent distinguishes an operator's explicit, targeted suspend from the
+// city-shutdown sweep. `gc stop` / `gc restart` issue suspend across every
+// session bead with no state pre-filter, so the sweep needs latitude on states
+// that have no live turn to suspend. An operator naming ONE session does not:
+// for them a state that cannot be suspended must still say so rather than
+// quietly killing a runtime under a different name.
+type suspendIntent int
+
+const (
+	// suspendIntentOperator is a targeted, operator-initiated suspend.
+	suspendIntentOperator suspendIntent = iota
+	// suspendIntentShutdown is the city stop/restart sweep.
+	suspendIntentShutdown
+)
+
+// Suspend saves session state and kills the runtime session. This is the
+// targeted, operator-facing form: a state the machine cannot suspend returns
+// ErrIllegalTransition rather than tearing a runtime down anyway.
 func (m *Manager) Suspend(id string) error {
+	return m.suspend(id, suspendIntentOperator)
+}
+
+// SuspendForShutdown is Suspend for the city stop/restart sweep, which issues
+// suspend across every session bead with no state pre-filter. It additionally
+// tolerates a draining seat: rejecting those with an illegal transition made
+// every restart SKIP them, so they survived as live panes still holding their
+// pool slot names (ga-rxhu2). The runtime is torn down and the bead is left in
+// draining for the drain machinery or the reconciler to finish.
+func (m *Manager) SuspendForShutdown(id string) error {
+	return m.suspend(id, suspendIntentShutdown)
+}
+
+func (m *Manager) suspend(id string, intent suspendIntent) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
@@ -1253,6 +1325,31 @@ func (m *Manager) Suspend(id string) error {
 			}
 			return nil
 		}
+		// draining is the same shape of problem as failed-create above, but only
+		// for the SHUTDOWN sweep: `gc stop` and `gc restart` issue suspend on every
+		// session bead with no state pre-filter, so rejecting draining with an
+		// illegal-transition error made every restart SKIP the draining seats. They
+		// survived as live panes still holding their pool slot names, which is
+		// precisely what starves the pool (ga-rxhu2).
+		//
+		// Scoped to the sweep on purpose. A targeted operator suspend of a draining
+		// seat still returns the illegal transition: the arm below has none of the
+		// gates the reconciler's terminal escalation insists on for the same class
+		// of kill (no assigned-work probe, no token fence, no confirm-dead), so
+		// letting an operator reach it would turn POST /suspend into an ungated
+		// mid-drain kill that reports success while the row stays draining and
+		// CmdWake cannot bring it back.
+		//
+		// The early return deliberately writes NO state. A drain is not a
+		// suspension: `state` stays draining so the drain machinery can finish it
+		// or the reconciler can reap it, and the drain reason survives the stop.
+		// For the same reason this is NOT a StateDraining -> StateSuspended edge in
+		// the transition table — suspended is still an OPEN row, so the edge would
+		// release no pool name while silently losing the drain. Only a close frees
+		// the name, and CmdClose is already legal from draining.
+		if current == StateDraining && intent == suspendIntentShutdown {
+			return m.tearDownRuntimeForSuspend(sessName)
+		}
 		// Normalize legacy/aliased states (empty and awake both mean active)
 		// after the failed-create pre-check above, preserving closed-guard-
 		// first ordering.
@@ -1261,34 +1358,63 @@ func (m *Manager) Suspend(id string) error {
 			return err
 		}
 
-		// Kill the runtime session. Stop is provider-idempotent, so call it
-		// even when liveness already reports false; tmux remain-on-exit panes
-		// can be non-running but still need their session artifact removed.
-		if strings.TrimSpace(sessName) != "" {
-			running := m.sp.IsRunning(sessName)
-			err := m.sp.Stop(sessName)
-			if err != nil && !running {
-				// Preserve historical Suspend semantics for already-dead
-				// sessions: cleanup is best-effort when the runtime did not
-				// report a live process before Stop.
-				err = nil
-			}
-			if err != nil {
-				return fmt.Errorf("stopping runtime session: %w", err)
-			}
+		if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
+			return err
 		}
 
 		// Update state and suspension timestamp together so stores with a
-		// write-through cache preserve one coherent lifecycle transition.
-		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+		// write-through cache preserve one coherent lifecycle transition. An
+		// operator's suspend supersedes any pending wake request (D7); the
+		// shutdown sweep leaves it for the next start.
+		patch := MetadataPatch{
 			"state":        string(StateSuspended),
 			"suspended_at": time.Now().UTC().Format(time.RFC3339),
-		}}); err != nil {
+			"slept_at":     "",
+			"sleep_reason": "",
+		}
+		if intent == suspendIntentOperator {
+			for k, v := range ClearWakeRequestPatch() {
+				patch[k] = v
+			}
+		}
+		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
 			return fmt.Errorf("updating suspension state: %w", err)
 		}
 
 		return nil
 	})
+}
+
+// tearDownRuntimeForSuspend kills the runtime session for a suspend. Stop is
+// provider-idempotent, so it is called even when liveness already reports false;
+// tmux remain-on-exit panes can be non-running but still need their session
+// artifact removed. It stops through runtime.StopForCleanup: a suspend only
+// needs the session gone, and a tmux server confirmed dead has nothing left
+// running even while a cached IsRunning still lists the session. An
+// unconfirmed missing-server answer, such as a live server whose socket file
+// was deleted, still fails the stop.
+//
+// A Stop failure is suppressed ONLY when the runtime did not report a live
+// process beforehand (historical Suspend semantics: cleanup of an already-dead
+// session is best-effort). A failure to tear down a runtime that WAS live is
+// reported: callers treat a nil return as "the seat stopped" — stopTargetsBounded
+// prints "Stopped agent", counts it, and records SessionStopped — so swallowing
+// it would make `gc stop` claim success over a pane that is still alive holding
+// its pool slot name, which is the exact condition this whole change exists to
+// surface.
+func (m *Manager) tearDownRuntimeForSuspend(sessName string) error {
+	if strings.TrimSpace(sessName) == "" {
+		return nil
+	}
+	running := m.sp.IsRunning(sessName)
+	err := runtime.StopForCleanup(m.sp, sessName)
+	if err != nil && !running {
+		err = nil
+	}
+	if err != nil {
+		return fmt.Errorf("stopping runtime session: %w", err)
+	}
+	return nil
 }
 
 // RequestFreshRestart marks a session for a controller-owned fresh restart
@@ -1344,13 +1470,19 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 			return err
 		}
 
-		// Stop the live runtime before marking the bead closed. Stop is
-		// idempotent for an already-gone session (returns nil), which also lets
-		// auto.Provider discard stale ACP route entries for suspended sessions.
-		// A genuine terminate failure must propagate and leave the bead open
-		// rather than report a "closed but still running" session — swallowing
-		// it here previously masked exactly that wedge.
-		if err := m.sp.Stop(sessName); err != nil {
+		// Stop the live runtime before marking the bead closed. Close is a
+		// cleanup path, so it absorbs a missing-session or missing-server
+		// answer via runtime.StopForCleanup — otherwise a session bead for an
+		// intentionally stopped city could never be closed once the city's
+		// tmux server is down. A genuine terminate failure still propagates,
+		// even beside such an answer, and leaves the bead open rather than
+		// reporting a "closed but still running" session; swallowing that
+		// previously masked exactly that wedge.
+		//
+		// Route-table hygiene is the provider's own concern: whether a stop
+		// clears a stale ACP route entry is not something this call site can
+		// observe or rely on.
+		if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
 			return fmt.Errorf("stopping runtime for session %s: %w", id, err)
 		}
 		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(id, time.Now().UTC())
@@ -1419,6 +1551,9 @@ func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bea
 // Kill force-kills the runtime process for a session without changing bead
 // state. This is intended for manual intervention; the reconciler will detect
 // the dead process and restart it according to the session's lifecycle rules.
+// Like Close, it is a cleanup path: a session that is already gone is the
+// outcome Kill was asked for, so it reports success rather than surfacing the
+// provider's "nothing to stop" answer to the operator.
 func (m *Manager) Kill(id string) error {
 	b, sessName, err := m.sessionBead(id)
 	if err != nil {
@@ -1436,12 +1571,21 @@ func (m *Manager) Kill(id string) error {
 			return fmt.Errorf("session %s is not active", id)
 		}
 	}
-	return m.sp.Stop(sessName)
+	return runtime.StopForCleanup(m.sp, sessName)
 }
 
 // BeginDrain transitions a session to the draining state. The caller is
 // responsible for signaling the runtime process to finish its work.
 // Idempotent: returns nil if the session is already draining.
+//
+// Population warning for a new caller: this stamps drain_at (BeginDrainPatch),
+// and drain_at is the durable clock cmd/gc's poolSlotDrainRetireDeadline bound
+// reads to decide that a pool seat's drain has outlived its deadline and its
+// runtime may be killed and its bead force-retired. That bound's safety
+// argument currently rests on drain_at being stamped only by the controller's
+// drain-ack path — this exported entry point has no production caller today —
+// so wiring an operator-facing drain here widens the bound's population.
+// Re-read cmd/gc/session_pool_drain_deadline.go before adding one.
 func (m *Manager) BeginDrain(id, reason string) error {
 	return withSessionMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdDrain, StateDraining)
@@ -1563,8 +1707,15 @@ func (m *Manager) Rename(id, title string) error {
 	return m.UpdatePresentation(id, &title, nil)
 }
 
-// UpdatePresentation updates user-facing session attributes.
+// UpdatePresentation updates user-facing session attributes. A blank or
+// whitespace-only title is refused with ErrInvalidSessionTitle before any
+// lock or store work, so neither half of a combined title+alias update lands.
 func (m *Manager) UpdatePresentation(id string, title *string, alias *string) error {
+	if title != nil {
+		if err := ValidateTitle(*title); err != nil {
+			return err
+		}
+	}
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
@@ -1710,8 +1861,9 @@ func templateOverrideWakeInFlight(metadata map[string]string, state State, now t
 // pruneStateTimestamp returns the timestamp that PruneDetailed compares
 // against its cutoff for a session in the given state. Suspended sessions keep
 // the historical CreatedAt fallback for legacy beads. Asleep sessions normally
-// require slept_at, except legacy drained-asleep beads without slept_at can use
-// the bead update timestamp because sleep_reason=drained is terminal.
+// require slept_at; legacy beads without slept_at fall back to a stale
+// suspended_at, then to the bead update timestamp when sleep_reason=drained
+// is terminal.
 func pruneStateTimestamp(b beads.Bead, state State) (time.Time, bool) {
 	switch state {
 	case StateSuspended:
@@ -1727,6 +1879,12 @@ func pruneStateTimestamp(b beads.Bead, state State) (time.Time, bool) {
 		}
 		if strings.TrimSpace(b.Metadata["slept_at"]) != "" {
 			return time.Time{}, false
+		}
+		// Legacy beads written before the suspended->asleep re-projection fix
+		// (gastownhall/gascity#5739) carry a stale suspended_at with no slept_at;
+		// use it so those already-stuck sessions become prunable too.
+		if ts, ok := parsePruneMetadataTimestamp(b.Metadata, "suspended_at"); ok {
+			return ts, true
 		}
 		if strings.TrimSpace(b.Metadata["sleep_reason"]) != "drained" {
 			return time.Time{}, false
@@ -1863,7 +2021,11 @@ func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) (Runti
 	obs.Running = liveness.Running
 	obs.Alive = liveness.Alive
 	if obs.Running {
-		obs.Attached = m.sp.IsAttached(info.SessionName)
+		attached, err := runtime.IsAttachedWithError(m.sp, info.SessionName)
+		if err != nil && runtime.AttachProbeHolds(attached, err) {
+			obs.AttachedErr = err
+		}
+		obs.Attached = attached && err == nil
 		lastActive, err := m.sp.GetLastActivity(info.SessionName)
 		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			return RuntimeObservation{}, fmt.Errorf("observe last activity for %q: %w", info.SessionName, err)
