@@ -481,6 +481,30 @@ func concretePoolKit(t *testing.T, kind, state string) (k *txKit, templateDir, c
 	return k, templateDir, concreteDir
 }
 
+// Kills the adopt's transcript probe reading the work dir the row names
+// before its concrete-pool repair (the C5a1-1 delta review): it probes the
+// dir prepare launches in.
+func TestAdoptProbesTheRepairedWorkDir(t *testing.T) {
+	k, _, concreteDir := concretePoolKit(t, intentAdopt, "creating")
+	row := k.p.World.Census.Rows[k.it.Key]
+	row.Info.SessionKey = "k-1"
+	k.p.World.Census.Rows[k.it.Key] = row
+	tp := TemplateParams{
+		TemplateName: "aot-mobile/gastown.polecat", InstanceName: "aot-mobile/gastown.capable", SessionName: "s-gc-1", WorkDir: concreteDir,
+		ResolvedProvider: &config.ResolvedProvider{Name: "claude", SessionIDFlag: "--session-id", ResumeFlag: "--resume", ResumeStyle: "flag"},
+	}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	k.runtimeAs("gc-1", "tok", nil)
+	var probed []string
+	old := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_, dir, _ string) (bool, bool) { probed = append(probed, dir); return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = old })
+	k.runKind()
+	if len(probed) == 0 || probed[0] != concreteDir {
+		t.Fatalf("probed %v, want the repaired dir %s", probed, concreteDir)
+	}
+}
+
 // Kills a prepare that writes (S-1): an adopt over a concrete pool row whose
 // work_dir needs repair commits, its prepare folding the repair in memory
 // only (the read-only stores would fail a write), and leaves the work_dir to
