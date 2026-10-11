@@ -715,7 +715,11 @@ func (t *tx) closeSection(ctx context.Context, sec section) (settlement, bool) {
 // wrote, otherwise a no-op with the step's cause.
 func (t *tx) done(step txStep) settlement {
 	if t.landed {
-		return settlement{Outcome: settledLanded}
+		s := settlement{Outcome: settledLanded}
+		if len(step.Write) > 0 { // this step's write stood in for a refusal (healInstead)
+			s.Cause = step.Cause
+		}
+		return s
 	}
 	return settlement{Outcome: settledNoop, Cause: step.Cause}
 }
