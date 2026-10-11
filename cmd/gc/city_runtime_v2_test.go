@@ -442,7 +442,7 @@ func TestCityRuntimeV2ReloadReplyAfterPublish(t *testing.T) {
 	rt.publishEnv()
 	doneCh := cr.activeReload.doneCh
 	var amendGen uint64
-	rt.softReload = func(intent reloadIntent, r *reloadControlReply) {
+	rt.softReload = func(_ context.Context, intent reloadIntent, r *reloadControlReply) {
 		amendGen = rt.env.Load().Gen
 		v2SoftReloadUnavailable(intent, r)
 	}
@@ -613,9 +613,10 @@ func TestCityRuntimeV2PanicInMaintenanceTickLeavesPlannerRunning(t *testing.T) {
 	}
 }
 
-// Kills: a soft reload under v2 answered as if drift acceptance ran (a
-// silent zero), or not answered (MAINT-025 is off until C7c). The reply
-// applies and says acceptance is unavailable; no session row is rewritten.
+// Kills: a soft reload under a trace-only v2 answered as if drift
+// acceptance ran (a silent zero), or not answered: no effect writes the
+// rows (acceptSoftReload). The reply applies and says acceptance is
+// unavailable; no session row is rewritten.
 func TestCityRuntimeV2SoftReloadRepliesUnavailable(t *testing.T) {
 	cr, store := newPhaseFixtureRuntime(t, true, false)
 	attachTestV2(t, cr)

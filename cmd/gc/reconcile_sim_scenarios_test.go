@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -242,9 +243,10 @@ func (s *sim) settle() {
 	s.audit("v2")
 }
 
-// workFor is in-progress work routed to the worker pool and assigned to id.
-func workFor(id string) beads.Bead {
-	return beads.Bead{ID: "gw-" + id, Title: "work", Type: "task", Status: "in_progress", Assignee: id, Metadata: map[string]string{"gc.routed_to": "worker"}}
+// gc1Work is in-progress work routed to the worker pool and assigned to
+// gc-1.
+func gc1Work() beads.Bead {
+	return beads.Bead{ID: "gw-gc-1", Title: "work", Type: "task", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}}
 }
 
 // gc1 is the city row gc-1's metadata on the backing.
@@ -288,7 +290,7 @@ func TestSimStabilityClearsAcrossTime(t *testing.T) {
 // time, and the runtime's death clears it in the same-pass restart's PreWake
 // CAS, which carries the dead-runtime heal.
 func TestSimDetachedAtFollowsTheAttachFact(t *testing.T) {
-	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1"), workFor("gc-1"))
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1"), gc1Work())
 	s.cfg.Agents[0].SleepAfterIdle = "5m"
 	attach := func(on bool) {
 		s.sp.mu.Lock()
@@ -334,7 +336,7 @@ func deadRuntimeHealAcrossTime(t *testing.T, held bool) {
 	if held {
 		meta = append(meta, "held_until", rowAt(2*time.Minute))
 	}
-	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", meta...), workFor("gc-1"))
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", meta...), gc1Work())
 	s.settle()
 	s.sp.mu.Lock()
 	s.sp.drop("s-gc-1")
@@ -414,7 +416,7 @@ func TestSimDeadRuntimeHealSkipsCensusOnlyRigRows(t *testing.T) {
 	meta := []string{"instance_token", "tok-1", "session_key", "k-1", "last_woke_at", rowAt(0), "quarantined_until", rowAt(time.Hour)}
 	rig := poolRow("rg-1", "worker", 11, "active", meta...)
 	s := newSim(t, 1, simOpts{rows: func(*sim) ([]beads.Bead, []beads.Bead) {
-		return []beads.Bead{poolRow("gc-1", "worker", 1, "active", meta...), workFor("gc-1")}, []beads.Bead{rig}
+		return []beads.Bead{poolRow("gc-1", "worker", 1, "active", meta...), gc1Work()}, []beads.Bead{rig}
 	}})
 	s.lag = false
 	for range 2 {
@@ -567,6 +569,63 @@ func TestSimDeferredStrandedDeathsRecordOnce(t *testing.T) {
 		if m := b.Metadata; m["wake_attempts"] != "2" || m["churn_count"] != "" || !s.livePane(b) {
 			t.Errorf("%s: wake_attempts %q churn_count %q live %v, want the rapid crash recorded once and the seat restarted", id, m["wake_attempts"], m["churn_count"], s.livePane(b))
 		}
+	}
+	s.noViolations(t)
+}
+
+// Kills a cutover drain storm (v5 M2, I21, Gate R R18; staging J13): a live
+// seat whose stored hashes carry the previous fingerprint version is
+// rebaselined to this binary's, all six keys, with no stop and no start.
+func TestSimCutoverV5HashesRebaselineNotDrain(t *testing.T) {
+	v5 := []string{"started_config_hash", "v5:core", "started_provision_hash", "v5:prov", "started_launch_hash", "v5:launch", "started_live_hash", "v5:live", "live_hash", "v5:live", "core_hash_breakdown", "{}"}
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", append([]string{"instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour)}, v5...)...), gc1Work())
+	s.settle()
+	s.settle()
+	m := s.gc1()
+	for i := 0; i < len(v5); i += 2 {
+		if k := v5[i]; k != "core_hash_breakdown" && !strings.HasPrefix(m[k], runtime.FingerprintVersion+":") || m[k] == v5[i+1] {
+			t.Errorf("%s = %q, want rebaselined under %s", k, m[k], runtime.FingerprintVersion)
+		}
+	}
+	if len(s.sp.kills) != 0 || len(s.sp.starts) != 0 || m["state"] != "active" {
+		t.Errorf("kills %v starts %v state %q, want the seat left running", s.sp.kills, s.sp.starts, m["state"])
+	}
+	s.noViolations(t)
+}
+
+// Kills a soft reload under v2 that accepts nothing, accepts a row twice,
+// or never replies (MAINT-025, v5 M2): a request for the env's generation
+// accepts a live seat's drifted config, with no stop and no start, counts it
+// once, and closes when no drifted row is left, so the reply carries it; a
+// newer request closes the older at once.
+func TestSimSoftReloadAcceptsDriftOnce(t *testing.T) {
+	stale := runtime.FingerprintVersion + ":stale"
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour), "started_config_hash", stale), gc1Work())
+	q := newSoftReloadRequest(1)
+	s.p.openSoftReload(q)
+	for range 3 {
+		s.settle()
+	}
+	select {
+	case <-q.done:
+	default:
+		t.Fatal("the request is still open with no drifted row left")
+	}
+	var r reloadControlReply
+	q.reply(&r)
+	if m := s.gc1(); r.AcceptedDriftCount == nil || *r.AcceptedDriftCount != 1 || m["started_config_hash"] == stale || !strings.HasPrefix(m["started_config_hash"], runtime.FingerprintVersion+":") {
+		t.Fatalf("reply %+v, row hash %q: want one accepted and the row's hash current", r, m["started_config_hash"])
+	}
+	if len(s.sp.kills) != 0 || len(s.sp.starts) != 0 {
+		t.Fatalf("kills %v starts %v, want the seat left running", s.sp.kills, s.sp.starts)
+	}
+	older, newer := newSoftReloadRequest(1), newSoftReloadRequest(1)
+	s.p.openSoftReload(older)
+	s.p.openSoftReload(newer)
+	select {
+	case <-older.done:
+	default:
+		t.Fatal("a newer request left the older open")
 	}
 	s.noViolations(t)
 }
