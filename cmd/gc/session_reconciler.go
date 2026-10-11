@@ -4488,7 +4488,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue // startup-health crash-loop protection (pending-create failures)
 				}
 			}
-			if pendingCreateStartInFlightInfo(info, clk, startupTimeout) {
+			// A start is in flight only while its holder lives: one a crashed
+			// controller left between PreWake and its commit is relaunched
+			// now, under this pass's own lease, once the row read under the
+			// lease still carries the marker this pass read (mc-5a1ma).
+			if pendingCreateStartInFlightInfo(info, clk, startupTimeout) && !startAbandoned(store, cityPath, info) {
 				if trace != nil {
 					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartInFlight, target.tp.TemplateName, name, traceRecordPayload{
 						"pending_create_claim": strings.TrimSpace(info.PendingCreateClaimMetadata),
