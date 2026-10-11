@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "dolt.go",
         "failure_artifacts.go",
+        "flock_linux.go",
         "git.go",
         "loopback_port.go",
         "loopback_port_lease_linux.go",
