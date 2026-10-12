@@ -1612,19 +1612,27 @@ func explicitWakePendingInfo(info sessionpkg.Info) bool {
 	return true
 }
 
-// explicitSleepIntentInfo reports a sleep intent the idle latch's demand
-// override must honor: any but a wait's own wait-hold. A wait hold already
-// suppresses every demand wake but pending-create, an explicit wake and its
-// wait turning ready (computeAwakeSet), and a sleeping waiter keeps its
-// intent (D-J 3), so counting it here would refuse the wait-ready wake of a
-// waiter holding work under an idle policy and strand its claim.
-func explicitSleepIntentInfo(info sessionpkg.Info) bool {
-	return info.SleepIntent != "" && strings.TrimSpace(info.SleepIntent) != string(sessionpkg.SleepReasonWaitHold)
+// explicitSleepIntentInfo returns the trimmed sleep intent the idle latch's
+// demand override must honor, or "" when there is none: any but a wait's own
+// wait-hold. A wait hold already suppresses every demand wake but
+// pending-create, an explicit wake and its wait turning ready
+// (computeAwakeSet), and a sleeping waiter keeps its intent (D-J 3), so
+// counting it here would refuse the wait-ready wake of a waiter holding work
+// under an idle policy and strand its claim.
+func explicitSleepIntentInfo(info sessionpkg.Info) string {
+	intent := strings.TrimSpace(info.SleepIntent)
+	if intent == string(sessionpkg.SleepReasonWaitHold) {
+		return ""
+	}
+	return intent
 }
 
 // wakeDemandOverridesSleepSuppression reports whether a wake the awake set
 // wants survives the session's config sleep suppression (the idle latch:
 // asleep with sleep_reason=idle under an unchanged sleep-policy fingerprint).
+//
+// sleepIntent is the session's trimmed explicit sleep intent
+// (explicitSleepIntentInfo), "" when it has none.
 //
 // explicitWake is the session's durable, still-pending wake_request=explicit
 // (`gc session wake`, the wake API, a peer's wake; see explicitWakePendingInfo):
@@ -1638,11 +1646,31 @@ func wakeDemandOverridesSleepSuppression(
 	policy resolvedSessionSleepPolicy,
 	poolDesired map[string]int,
 	template string,
-	hasExplicitSleepIntent bool,
+	sleepIntent string,
 	explicitWake bool,
 ) bool {
-	if hasExplicitSleepIntent {
+	// A terminal attached to the session holds it awake for every sleep
+	// class: the pane's last activity says nothing about a human reading it.
+	// An attach probe that could not tell never reaches here as attached:
+	// legacy defers the row, and v2 clears it (configSleepSuppressed).
+	// Without this, the config suppression computed from that activity
+	// overrode the attached wake and drained the session under its user.
+	// ComputeAwakeSet already keeps attached sessions out of its own
+	// idle-sleep; this is the same rule for the sleep-policy suppression
+	// layered on top of it. It reads decision.Attached, not the reason
+	// label: a ready wait relabels an attached wake to "wait-ready".
+	attached := decision.Attached
+	// The reconciler's own idle-stop-pending marker is not a sleep request
+	// from anyone: it records an idle verdict that an attach since (or a
+	// single false "not attached" read at the window's edge) has overtaken.
+	// Let the attachment win over it, so the awake path cancels the idle
+	// drain and clears the marker. Any other sleep intent (user-hold, a
+	// session's own request) still wins over the attachment.
+	if sleepIntent != "" && (!attached || sleepIntent != sleepIntentIdle) {
 		return false
+	}
+	if attached {
+		return true
 	}
 	if eval.HasAssignedWork || explicitWake {
 		return true
@@ -4276,15 +4304,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// from before gc stop must not cancel the post-start guarantee.
 			// Interactive sessions honor their idle window against
 			// pool-scale demand — an idle chat session should still sleep
-			// to release resources. Two wakes override for every class: a
-			// durable explicit wake request, and routed demand on the
-			// canonical alias holder (the only session that can serve it).
-			// Explicit sleep_intent always wins — if the session has
-			// signaled it wants to sleep, honor that regardless of demand.
+			// to release resources. Three wakes override for every class:
+			// an attached terminal, a durable explicit wake request, and
+			// routed demand on the canonical alias holder (the only session
+			// that can serve it). An explicit sleep_intent (a user hold, the
+			// session's own request) wins over all demand, the attachment
+			// included. The reconciler's own idle-stop-pending marker is the
+			// exception: it yields to an attachment.
 			template := normalizedSessionTemplateInfo(info, cfg)
-			hasExplicitSleepIntent := explicitSleepIntentInfo(info)
 			explicitWake := explicitWakePendingInfo(info)
-			demandOverrides := wakeDemandOverridesSleepSuppression(decision, eval, policy, poolDesired, template, hasExplicitSleepIntent, explicitWake)
+			demandOverrides := wakeDemandOverridesSleepSuppression(decision, eval, policy, poolDesired, template, explicitSleepIntentInfo(info), explicitWake)
 			if !demandOverrides {
 				eval.ConfigSuppressed = true
 				eval.Reasons = nil // Clear reasons so Phase 2 does not cancel the drain.
