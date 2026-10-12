@@ -739,9 +739,14 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		}
 	}
 
-	target, err := resolveNudgeTarget(targetID, stderr)
+	// With no explicit target, the drain is the hook's own: GC_SESSION_ID
+	// names its session bead exactly, so it is preferred over GC_ALIAS.
+	target, err := resolveNudgeTargetPreferringHookIdentity(targetID, len(args) == 0, stderr)
 	if err != nil {
 		if inject {
+			if errors.Is(err, errHookSessionClosed) {
+				fmt.Fprintf(stderr, "gc nudge drain: %v; not draining its nudges\n", err) //nolint:errcheck
+			}
 			wispExtra = ""
 			injectPrefix += contextInjectLineForSample(contextUsage, nil, nil)
 			return 0
@@ -843,11 +848,24 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		return 1
 	}
 	if inject {
+		// gc hook run discards this output if the hook overruns its deadline,
+		// so ack only while there is time to finish; otherwise release the
+		// claims so the next drain delivers the nudges again.
+		if !hookDeadlineAllowsNudgeAck(fmt.Sprintf("%d injected nudge(s)", len(items)), stderr) {
+			if err := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); err != nil {
+				fmt.Fprintf(stderr, "gc nudge drain: releasing injected nudges: %v; their lease expiry returns them\n", err) //nolint:errcheck
+			}
+			return 0
+		}
 		if err := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "accepted_for_injection", "", "hook-transport-accepted"); err != nil {
 			fmt.Fprintf(stderr, "gc nudge drain: recording injection ack: %v\n", err) //nolint:errcheck
 			return 0
 		}
-		stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
+		// The delivery stamp is best-effort bookkeeping after the destructive
+		// ack; it is skipped rather than run into the deadline.
+		if hookDeadlineStillLeavesTime() {
+			stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
+		}
 		return 0
 	}
 	if err := ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)); err != nil {
@@ -1641,6 +1659,17 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 }
 
 func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTarget, error) {
+	return resolveNudgeTargetPreferringHookIdentity(identifier, false, warningWriter...)
+}
+
+// resolveNudgeTargetPreferringHookIdentity is resolveNudgeTarget for a caller
+// that may target the hook's own session. With preferHookIdentity, an open
+// session bead named by GC_SESSION_ID is the target, resolved with one Get and
+// without entering the named-session materialize path, and a closed one is
+// refused (errHookSessionClosed) rather than replaced by whatever identifier
+// resolves to now — a successor holding the alias. When GC_SESSION_ID is unset
+// or stale, identifier resolves exactly as resolveNudgeTarget resolves it.
+func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdentity bool, warningWriter ...io.Writer) (nudgeTarget, error) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return nudgeTarget{}, err
@@ -1655,6 +1684,18 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 		// reads the session bead; both route through the session-class store
 		// (identity today) while the raw store remains the nudge-queue currency.
 		sessStore := cliSessionStore(store.Store, cfg, cityPath)
+		if preferHookIdentity {
+			identity, ok, err := resolveHookIdentity(sessStore)
+			if err != nil {
+				return nudgeTarget{}, err
+			}
+			if ok {
+				if identity.info.Closed {
+					return nudgeTarget{}, closedHookSessionError(identity.info.ID)
+				}
+				return resolveNudgeTargetFromSessionInfo(cityPath, cfg, identity.info), nil
+			}
+		}
 		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier)
 		if err == nil {
 			info, getErr := sessionFrontDoor(sessStore).Get(sessionID)
@@ -2042,6 +2083,23 @@ func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
 			target.continuationEpoch = info.ContinuationEpoch
 		}
 		return target
+	}
+	return target
+}
+
+// withNudgeTargetFenceFromLiveSession is withNudgeTargetFence for a caller
+// that has already read the target's live session: when that session carries
+// the target's session name it is the open session the fence would find, so
+// the fence is taken from it without listing the city's sessions.
+func withNudgeTargetFenceFromLiveSession(store beads.Store, live *session.Info, target nudgeTarget) nudgeTarget {
+	if live == nil || live.Closed || target.sessionName == "" || live.SessionNameMetadata != target.sessionName {
+		return withNudgeTargetFence(store, target)
+	}
+	if target.sessionID == "" {
+		target.sessionID = live.ID
+	}
+	if target.continuationEpoch == "" {
+		target.continuationEpoch = live.ContinuationEpoch
 	}
 	return target
 }
