@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strconv"
 	"testing"
@@ -414,5 +415,132 @@ func TestOperatorResumeClearsAStaleAck(t *testing.T) {
 		case running && (got.Metadata[session.DrainAckIncarnationKey] != "3" || got.Metadata[session.DrainIntentReasonKey] != drainConfigDrift):
 			t.Errorf("an attach to a running runtime: row %v, want the stop request kept", got.Metadata)
 		}
+	}
+}
+
+// attachRaceSP is a fake runtime whose first IsRunning and first Start run
+// a hook: an injection point inside an operator's attach.
+type attachRaceSP struct {
+	*runtime.Fake
+	onIsRunning, onStart func()
+}
+
+func (h *attachRaceSP) IsRunning(name string) bool {
+	if f := h.onIsRunning; f != nil {
+		h.onIsRunning = nil
+		f()
+	}
+	return h.Fake.IsRunning(name)
+}
+
+func (h *attachRaceSP) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	err := h.Fake.Start(ctx, name, cfg)
+	if f := h.onStart; f != nil {
+		h.onStart = nil
+		f()
+	}
+	return err
+}
+
+// attachRaceStore runs beforeClear once, before the first metadata batch
+// that clears the stop request's controller half (the operator's confirm).
+type attachRaceStore struct {
+	*beads.MemStore
+	beforeClear func()
+}
+
+func (s *attachRaceStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if _, ok := kvs[session.DrainIntentReasonKey]; ok && s.beforeClear != nil {
+		f := s.beforeClear
+		s.beforeClear = nil
+		f()
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+// TestSignalNeverStrandsAnOperatorStart (#7638, mc-ted51; review probes
+// W1-W3). Kills a plain signal that lands inside an operator's attach (gc
+// session attach, its own process: the controller's session mutation lock
+// is not the operator's, withRowMutationLock passed through) and leaves the
+// runtime the operator started stop-pending for the next pass's A4. The
+// signal runs at three points of the real Manager.Attach: W1, between the
+// operator's row read and its runtime lease (the attach then reads the row
+// again under the lease and refuses, starting nothing); W2, right after the
+// Start, and W3, just before the confirm's write, both under the lease,
+// where the signal refuses busy. No point ends with a started runtime on a
+// signaled row.
+func TestSignalNeverStrandsAnOperatorStart(t *testing.T) {
+	for _, at := range []string{"W1", "W2", "W3"} {
+		t.Run(at, func(t *testing.T) {
+			p, it, store, _ := admittedBeginOn(t, append([]string{"provider", "claude"}, intentBegunAt(drainOrphaned, time.Hour)...), undesired(drainOrphaned))
+			if it.Kind != intentSignal {
+				t.Fatalf("decided %+v, want the plain signal", it)
+			}
+			saved := withRowMutationLock
+			withRowMutationLock = func(_ string, fn func() error) error { return fn() }
+			t.Cleanup(func() { withRowMutationLock = saved })
+			var sig settlement
+			ran := false
+			signal := func() { ran, sig = true, runTx(context.Background(), p, it, effectSpecs[it.Kind], nil) }
+			sp := &attachRaceSP{Fake: runtime.NewFake()} // the runtime died after the pass observed it
+			mstore := store
+			switch at {
+			case "W1":
+				sp.onIsRunning = signal
+			case "W2":
+				sp.onStart = signal
+			case "W3":
+				mstore = &attachRaceStore{MemStore: store.(*beads.MemStore), beforeClear: signal}
+			}
+			city := p.World.CityPath
+			err := session.NewManagerWithOptions(mstore, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), it.Key.ID, "claude", runtime.Config{})
+			got, gerr := store.Get(it.Key.ID)
+			if gerr != nil {
+				t.Fatal(gerr)
+			}
+			req, active := activeStop(censusRowOf(t, got))
+			running := sp.Fake.IsRunning("s-gc-1")
+			switch {
+			case !ran:
+				t.Fatal("the signal never ran")
+			case running && active && req.Phase == stopSignaled:
+				t.Fatalf("attach err %v, signal %+v: a started runtime on a signaled row %v, which the next pass's A4 stops", err, sig, got.Metadata)
+			case at == "W1" && (!errors.Is(err, session.ErrSessionStopping) || running):
+				t.Fatalf("attach err %v, running %t: want the attach to refuse the row the signal stopped, starting nothing", err, running)
+			case at != "W1" && (sig.Outcome != settledRefused || sig.Cause != causeNameBusy || err != nil):
+				t.Fatalf("signal %+v, attach err %v: want the signal refused busy under the operator's lease and the attach done", sig, err)
+			}
+		})
+	}
+}
+
+// TestOperatorStartClearsARequestBegunBeforeItsLease (#7638 review). Kills
+// an operator's start that clears the stop request it read before its lease:
+// a drain the controller begins between the attach's first read of the row
+// and its lease is cleared by the start's confirm (the row read under the
+// lease), so the next pass never signals and stops the runtime the operator
+// started.
+func TestOperatorStartClearsARequestBegunBeforeItsLease(t *testing.T) {
+	store, _ := stampedMem(t, gate.Require)
+	b, err := store.Create(drainRow("provider", "claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	begin := func() {
+		if err := store.SetMetadataBatch(b.ID, map[string]string(stopBeginPatch(newCensusRow(rowKeyOf(b.ID), sessionInfoFromBead(b)), drainOrphaned, gatherNow))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sp := &attachRaceSP{Fake: runtime.NewFake(), onIsRunning: begin}
+	city := t.TempDir()
+	if err := session.NewManagerWithOptions(store, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, active := activeStop(censusRowOf(t, got)); active || !sp.Fake.IsRunning("s-gc-1") {
+		t.Fatalf("row %v: want the runtime started and the request begun before the lease cleared", got.Metadata)
 	}
 }
