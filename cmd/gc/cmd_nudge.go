@@ -1190,6 +1190,19 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	if queueManagedWake {
 		return queueManagedSessionNudgeWake(target, store, message, mode, jsonOutput, stdout, stderr)
 	}
+	// Never type into a pending permission prompt (#2892): its highlighted
+	// "❯ 1. Yes" reads as an idle composer, and the nudge's Enter would
+	// approve the tool call. wait-idle already means "deliver at a safe
+	// boundary", so queue it behind the prompt; immediate cannot wait, so
+	// refuse with an explanation.
+	pending, err := nudgeTargetPendingInteraction(target, sessStore, sp, mode, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if pending != nil {
+		return refuseOrQueueNudgeBehindPendingInteraction(target, store, sp, message, mode, jsonOutput, describeWorkerPendingInteraction(pending), stdout, stderr)
+	}
 	// A wait-idle nudge to a RUNNING-but-busy target must not block the caller in
 	// the worker's synchronous WaitForIdle (runtimeHandleWaitIdleTimeout, 30s):
 	// the session never reports idle for the whole window, so the caller stalls
@@ -1248,6 +1261,11 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 				return 1
 			}
 		}
+		if errors.Is(err, runtime.ErrPendingInteraction) {
+			// The prompt appeared between the probe above and delivery; the
+			// runtime refused to type into it.
+			return refuseOrQueueNudgeBehindPendingInteraction(target, store, sp, message, mode, jsonOutput, err.Error(), stdout, stderr)
+		}
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -1273,6 +1291,54 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	}
 	fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
 	return 0
+}
+
+// nudgeTargetPendingInteraction reports the interaction the target session is
+// waiting on, if any. Providers that cannot report interactions report none.
+// A look that fails is an error for an immediate nudge, which cannot wait for
+// an answer. A wait-idle nudge reports the failure on stderr and goes on: its
+// delivery looks for a prompt again before it types, and the nudge is queued
+// behind one it finds.
+func nudgeTargetPendingInteraction(target nudgeTarget, sessStore beads.Store, sp runtime.Provider, mode nudgeDeliveryMode, stderr io.Writer) (*worker.PendingInteraction, error) {
+	handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
+	if err != nil {
+		return nil, err
+	}
+	pending, err := handle.Pending(context.Background())
+	if err == nil {
+		return pending, nil
+	}
+	err = fmt.Errorf("checking %s for a pending permission prompt: %w", target.agentKey(), err)
+	if mode != nudgeDeliveryWaitIdle {
+		return nil, err
+	}
+	fmt.Fprintf(stderr, "gc session nudge: %v; delivering when idle, which looks again before it types\n", err) //nolint:errcheck
+	return nil, nil
+}
+
+func describeWorkerPendingInteraction(pending *worker.PendingInteraction) string {
+	what := strings.TrimSpace(pending.Kind)
+	if what == "" {
+		what = "interaction"
+	}
+	if prompt := strings.TrimSpace(pending.Prompt); prompt != "" {
+		what += " " + strconv.Quote(prompt)
+	}
+	if pending.RequestID != "" {
+		what += ", request " + pending.RequestID
+	}
+	return what
+}
+
+// refuseOrQueueNudgeBehindPendingInteraction handles a nudge to a session that
+// is waiting on a permission prompt: wait-idle queues it for delivery after
+// the prompt is answered; immediate fails with an explanation.
+func refuseOrQueueNudgeBehindPendingInteraction(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, what string, stdout, stderr io.Writer) int {
+	if mode == nudgeDeliveryWaitIdle {
+		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, worker.NudgeUndeliveredPendingInteraction, stdout, stderr)
+	}
+	fmt.Fprintf(stderr, "gc session nudge: %s is waiting on a permission prompt (%s); typing now would answer it. Approve or deny it first (POST .../session/{id}/respond), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered\n", target.agentKey(), what) //nolint:errcheck
+	return 1
 }
 
 func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runtime.Provider) (bool, error) {
@@ -1556,6 +1622,8 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 		return fmt.Sprintf(" (live delivery is unsupported for %s; the queued dispatcher delivers it)", provider)
 	case worker.NudgeUndeliveredNoIdleBoundary:
 		return " (the session never reached an idle boundary; the queued dispatcher delivers it)"
+	case worker.NudgeUndeliveredPendingInteraction:
+		return " (the session is waiting on a permission prompt; the queued dispatcher delivers it after the prompt is answered)"
 	case worker.NudgeUndeliveredHeld, worker.NudgeQueuedHeld:
 		return " (the session is held by an operator or a wait; the nudge is delivered the next time the session runs, and expires after 24h)"
 	default:
@@ -1935,8 +2003,8 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	})
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
-		if queuedNudgeDeliveryRefused(err) {
-			if recErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); recErr != nil {
+		if retryAt, released := queuedNudgeReleaseAfter(err, time.Now()); released {
+			if recErr := releaseQueuedNudgeClaimsUntil(target.cityPath, queuedNudgeIDs(items), retryAt); recErr != nil {
 				return false, errors.Join(bookkeepErr, recErr)
 			}
 			return false, bookkeepErr
@@ -1966,17 +2034,6 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 	stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
 	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
-}
-
-// queuedNudgeDeliveryRefused reports whether a failed delivery must release its
-// claims and retry, rather than count toward failedQueuedNudge's attempt cap. A
-// vanished session and a seat holding a pending interaction are refusals, not
-// delivery failures: nothing was typed, and charging them would dead-letter a
-// good nudge for arriving at the wrong moment.
-func queuedNudgeDeliveryRefused(err error) bool {
-	return errors.Is(err, runtime.ErrSessionNotFound) ||
-		errors.Is(err, session.ErrPendingInteraction) ||
-		errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction)
 }
 
 func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t time.Time) {
@@ -3080,7 +3137,39 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 	})
 }
 
+// queuedNudgeReleaseAfter reports whether a delivery error leaves the nudges
+// undelivered rather than failed, so their claims are released without
+// spending one of their bounded attempts, and when a later pass may claim them
+// again. A vanished session and a seat holding a pending interaction are
+// refusals, not delivery failures: nothing was typed, and charging them would
+// dead-letter a good nudge for arriving at the wrong moment. A session that
+// went away may be back at once. The ACP provider refuses a nudge while it
+// holds a permission request, and the next pass tries again. A permission
+// prompt the runtime refused to type into (#2892) stays up until someone
+// answers it, so claiming the nudges again on the very next pass would only
+// be refused again.
+func queuedNudgeReleaseAfter(err error, now time.Time) (time.Time, bool) {
+	switch {
+	// Before ErrPendingInteraction: the session layer wraps this refusal in
+	// session.ErrPendingInteraction, which is that sentinel.
+	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction):
+		return time.Time{}, true
+	case errors.Is(err, runtime.ErrPendingInteraction):
+		return now.Add(defaultQueuedNudgeRetryDelay), true
+	case errors.Is(err, runtime.ErrSessionNotFound):
+		return time.Time{}, true
+	default:
+		return time.Time{}, false
+	}
+}
+
 func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
+	return releaseQueuedNudgeClaimsUntil(cityPath, ids, time.Time{})
+}
+
+// releaseQueuedNudgeClaimsUntil returns claimed nudges to pending. A non-zero
+// deliverAfter keeps them from being claimed again before then.
+func releaseQueuedNudgeClaimsUntil(cityPath string, ids []string, deliverAfter time.Time) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -3112,6 +3201,9 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 			}
 			item.ClaimedAt = time.Time{}
 			item.LeaseUntil = time.Time{}
+			if !deliverAfter.IsZero() {
+				item.DeliverAfter = deliverAfter.UTC()
+			}
 			released = append(released, item)
 		}
 		state.InFlight = inFlight

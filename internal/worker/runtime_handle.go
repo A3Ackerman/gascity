@@ -450,12 +450,14 @@ func (h *RuntimeHandle) Respond(_ context.Context, req InteractionResponse) erro
 // session vocabulary, as session.Manager does, so a caller maps them the same
 // way for a runtime-only handle: a nudge refused while an interaction is
 // pending is session.ErrPendingInteraction, and a response the provider
-// rejects is session.ErrInteractionMismatch. The runtime error stays wrapped.
+// rejects, or one naming an action the pending prompt does not offer, is
+// session.ErrInteractionMismatch. The runtime error stays wrapped.
 func runtimeInteractionError(err error) error {
 	switch {
 	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction):
 		return fmt.Errorf("%w: %w", sessionpkg.ErrPendingInteraction, err)
-	case errors.Is(err, runtime.ErrInteractionResponseInvalid):
+	case errors.Is(err, runtime.ErrInteractionResponseInvalid),
+		errors.Is(err, runtime.ErrInteractionActionUnavailable):
 		return fmt.Errorf("%w: %w", sessionpkg.ErrInteractionMismatch, err)
 	}
 	return err

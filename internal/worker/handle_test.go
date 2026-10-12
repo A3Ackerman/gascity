@@ -755,12 +755,14 @@ func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 	for _, call := range calls {
 		methods = append(methods, call.Method)
 	}
-	want := []string{"IsRunning", "Interrupt", "WaitForIdle", "SendKeys", "Pending", "NudgeNow"}
+	// Claude's interrupted prompt is cleared with the verified ClearInput,
+	// not a single Ctrl-U (one Ctrl-U removes only one wrapped row).
+	want := []string{"IsRunning", "Interrupt", "WaitForIdle", "ClearInput", "Pending", "NudgeNow"}
 	if !containsSubsequence(methods, want) {
 		t.Fatalf("methods = %v, want subsequence %v", methods, want)
 	}
-	if !hasCall(calls, "SendKeys", "C-u") {
-		t.Fatalf("calls = %#v, want SendKeys C-u", calls)
+	if hasCall(calls, "SendKeys", "C-u") {
+		t.Fatalf("methods = %v, want no single SendKeys C-u", methods)
 	}
 }
 
@@ -1645,6 +1647,11 @@ func TestRuntimeHandleReportsInteractionRefusalsInSessionVocabulary(t *testing.T
 	err = handle.Respond(ctx, InteractionResponse{Action: "bogus"})
 	if !errors.Is(err, sessionpkg.ErrInteractionMismatch) || !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
 		t.Errorf("Respond = %v, want session.ErrInteractionMismatch wrapping runtime.ErrInteractionResponseInvalid", err)
+	}
+	sp.err = fmt.Errorf("%w: no option for %q", runtime.ErrInteractionActionUnavailable, "approve")
+	err = handle.Respond(ctx, InteractionResponse{Action: "approve"})
+	if !errors.Is(err, sessionpkg.ErrInteractionMismatch) || !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+		t.Errorf("Respond to a prompt without that action = %v, want session.ErrInteractionMismatch wrapping runtime.ErrInteractionActionUnavailable", err)
 	}
 
 	other := errors.New("session unavailable")
