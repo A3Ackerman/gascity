@@ -269,6 +269,7 @@ type needs struct {
 	Runtime   bool      // the runtime read fresh each attempt
 	Legs      fenceLegs // legAttach (L3), legPending (L4) on the routed leaf; legWork (L5) live
 	Idle      bool      // the agent proved idle on the routed leaf
+	Activity  bool      // the agent's activity read on the routed leaf (a named drift restart's deferral)
 	Escalates bool      // a C8.5 escalation class: L3 escalates on a terminal-no-report leaf
 	Attempts  int       // CAS rounds per section, each deciding again; 0 is 3
 	// Lease takes the row's runtime lease record, not the name's flock
@@ -276,6 +277,11 @@ type needs struct {
 	// writes the incarnation or the commit. Every section with a Call needs
 	// it (the registry test).
 	Lease bool
+	// LeaseAt, with Lease, takes the record only just before that section
+	// (the name's flock from the start), as legacy's start takes its record
+	// only before PreWake: an effect that ends before it, a deferral, writes
+	// nothing.
+	LeaseAt int
 }
 
 func (s effectSpec) needsOf(w *World, it intent) needs {
@@ -448,6 +454,19 @@ type txFence struct {
 	Read            fenceLegs // the legs read: one not read holds (fenceDestructive)
 	Work            *txWork
 	Idle            bool // proved idle: WaitForIdle, then no activity since the pass
+	Activity        *activityRead
+}
+
+// workHeld reports L5 holding: work read on the seat, or a read that failed
+// or was not made (fails closed).
+func (f txFence) workHeld() bool { return f.Work == nil || f.Work.Err != nil || !f.Work.Free }
+
+// activityRead is the routed leaf's activity read: whether it reports
+// activity for the name, and its last.
+type activityRead struct {
+	Reportable bool
+	Last       time.Time
+	Err        error
 }
 
 // txStep is Decide's verdict: refuse or fail (writing nothing), write, or
@@ -596,21 +615,46 @@ func runSpec(ctx context.Context, p *effectPass, it intent, spec effectSpec, c t
 				return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err}
 			}
 		}
-		name, lease, cause, err := lockRuntimeName(p.World, row.Info, front, session.RuntimeLeaseTTL(effectBudget(ctx)))
+		ttl := session.RuntimeLeaseTTL(effectBudget(ctx))
+		if t.needs.Lease && t.needs.LeaseAt > 0 {
+			t.recordFront, t.recordTTL, front = front, ttl, nil // the flock now, the record at LeaseAt
+		}
+		name, lease, cause, err := lockRuntimeName(p.World, row.Info, front, ttl)
 		if cause != "" {
 			return settlement{Outcome: settledRefused, Cause: cause, Err: err}
 		}
 		defer lease.Release()
 		t.name, t.lease = name, lease
-		if lease.Epoch() > 0 {
-			// One epoch per effect: it ends by the lease's SafeUntil, compared
-			// as remaining durations, never wall clock to wall clock.
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeoutCause(ctx, time.Until(lease.SafeUntil()), session.ErrRuntimeLeaseExpired)
-			defer cancel()
-		}
+		var cancel context.CancelFunc
+		ctx, cancel = leaseBound(ctx, lease)
+		defer cancel()
 	}
 	return t.run(ctx, spec.sections)
+}
+
+// leaseBound is ctx bounded by lease's record: one epoch per effect ends by
+// the lease's SafeUntil, compared as remaining durations, never wall clock
+// to wall clock. A flock-only lease bounds nothing.
+func leaseBound(ctx context.Context, lease *session.RuntimeLease) (context.Context, context.CancelFunc) {
+	if lease == nil || lease.Epoch() == 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeoutCause(ctx, time.Until(lease.SafeUntil()), session.ErrRuntimeLeaseExpired)
+}
+
+// takeRecord takes the lease record a LeaseAt effect deferred, bounding ctx
+// by it; a refusal is lockRuntimeName's.
+func (t *tx) takeRecord(ctx context.Context) (context.Context, context.CancelFunc, *settlement) {
+	if ctx.Err() != nil { // past its deadline: write no record, as the eager take
+		s := ended(ctx)
+		return ctx, func() {}, &s
+	}
+	req := session.RuntimeLeaseRequest{City: t.p.World.CityPath, Name: t.name, ID: t.view.It.Key.ID, TTL: t.recordTTL}
+	if err := t.lease.TakeRecord(t.recordFront, req); err != nil {
+		return ctx, func() {}, &settlement{Outcome: settledRefused, Cause: leaseRefusal(err), Err: err}
+	}
+	ctx, cancel := leaseBound(ctx, t.lease)
+	return ctx, cancel, nil
 }
 
 // locksName reports an effect that holds its row's runtime name: one that
@@ -634,29 +678,40 @@ func effectBudget(ctx context.Context) time.Duration {
 
 // tx is one transaction across its sections.
 type tx struct {
-	c       txCaps
-	p       *effectPass
-	needs   needs
-	writer  fencedWriter
-	name    string                // the runtime name, when the name lock is held
-	lease   *session.RuntimeLease // the name's lease: its flock, and with needs.Lease the row's record
-	expect  session.Info          // the row the premise expects
-	names   []string              // its template's process names, keyed on the pass's row
-	facts0  session.Facts         // its premise facts
-	basis   rowBasis              // its incarnation and token
-	started bool                  // a callStart ran, and no callStop since
-	stopped bool                  // a callStop ran
-	landed  bool                  // a section's write landed
-	last    bool                  // the concluded step ends the effect after its Call (txStep.Last)
-	facts   effectFacts
-	pass    any // the concluded step's Pass, to its section's Call
-	view    txView
+	c      txCaps
+	p      *effectPass
+	needs  needs
+	writer fencedWriter
+	name   string                // the runtime name, when the name lock is held
+	lease  *session.RuntimeLease // the name's lease: its flock, and with needs.Lease the row's record
+	// recordFront and recordTTL are a LeaseAt effect's record to take.
+	recordFront *session.Store
+	recordTTL   time.Duration
+	expect      session.Info  // the row the premise expects
+	names       []string      // its template's process names, keyed on the pass's row
+	facts0      session.Facts // its premise facts
+	basis       rowBasis      // its incarnation and token
+	started     bool          // a callStart ran, and no callStop since
+	stopped     bool          // a callStop ran
+	landed      bool          // a section's write landed
+	last        bool          // the concluded step ends the effect after its Call (txStep.Last)
+	facts       effectFacts
+	pass        any // the concluded step's Pass, to its section's Call
+	view        txView
 }
 
 // run runs the sections, each under the row's mutation lock.
 func (t *tx) run(ctx context.Context, sections []section) settlement {
 	s := settlement{Outcome: settledNoop}
 	for i, sec := range sections {
+		if t.recordFront != nil && i == t.needs.LeaseAt {
+			var cancel context.CancelFunc
+			var refused *settlement
+			if ctx, cancel, refused = t.takeRecord(ctx); refused != nil {
+				return *refused
+			}
+			defer cancel()
+		}
 		t.c.section = i
 		end := false
 		_ = withRowMutationLock(t.view.It.Key.ID, func() error {
