@@ -282,6 +282,15 @@ func closeEffectCases(t *testing.T, bare bool) {
 			t.Fatalf("row %s %v, want closed with every hold cleared", b.Status, b.Metadata)
 		}
 	})
+	t.Run("a wake or restart request on the row holds no close", func(t *testing.T) {
+		for _, req := range [][]string{{"wake_request", "explicit"}, {"restart_requested", "true"}} {
+			c := mk(t, livenessGone, desireDrain, "state", "asleep", req[0], req[1])
+			c.entry().DrainReason = drainOrphaned
+			if s := c.run(t, gone().tmux()); s.Outcome != settledLanded || !s.Closed {
+				t.Fatalf("%s: settlement %+v, want the close landed", req[0], s)
+			}
+		}
+	})
 	t.Run("work holds the close, with no lease taken", func(t *testing.T) {
 		c := mk(t, livenessGone, desireDrain, "state", "asleep")
 		c.entry().DrainReason, c.w.CitySuspended = drainSuspended, true
