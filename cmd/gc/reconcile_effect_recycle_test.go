@@ -389,4 +389,33 @@ func TestStartRecycleDrainedDeathCountsNothing(t *testing.T) {
 			t.Fatalf("%s: churn %q attempts %q, want nothing counted for a drained death", name, k.meta("churn_count"), k.meta("wake_attempts"))
 		}
 	}
+	// D1: a drain requested since the pass, on the fresh row alone, as
+	// deathStep's Decide reads it (E05's shape).
+	k, _, _ := deadKit(t, false, "gc-1", "tok", "", "state", "awake", "last_woke_at", gatherNow.Add(-10*time.Second).Format(time.RFC3339), "wake_attempts", "1")
+	b, err := k.backing.Get(k.it.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := maps.Clone(b.Metadata)
+	meta[session.DrainIntentReasonKey], meta[session.DrainIntentAtKey], meta[session.DrainIntentIncarnationKey] = "idle", gatherNow.Format(time.RFC3339), "3"
+	v := txView{It: k.it, World: k.p.World, Row: k.p.World.Census.Rows[k.it.Key].Info, Meta: meta, Now: gatherNow, prev: deadKilled{killed: true, account: true}}
+	if step := deathStep(v); step.Write["wake_attempts"] != "" || step.Done {
+		t.Fatalf("a drain on the fresh row alone: step %+v, want nothing counted", step)
+	}
+}
+
+// Kills a death's crash recorded twice (SESS-089; the C5c2 review): a
+// zombie A12 classified, then recycled by a wake (a heartbeat respawn, an
+// operator's wake), records no second session.crashed; another token's does.
+func TestStartRecycleSkipsACrashA12Recorded(t *testing.T) {
+	for _, c := range []struct {
+		token   string
+		crashed int
+	}{{"gc-1/tok", 0}, {"gc-1/old", 1}} {
+		k, _, rec := deadKit(t, true, "gc-1", "tok", "panic: boom")
+		k.p.World.Classified = map[rowKey]string{k.it.Key: c.token}
+		if s := k.runKind(); s.Outcome != settledLanded || crashes(rec) != c.crashed || k.killsBy("KillZombieObject") != 1 {
+			t.Fatalf("classified %s: settlement %+v crashes %d, want recycled with %d crash", c.token, s, crashes(rec), c.crashed)
+		}
+	}
 }

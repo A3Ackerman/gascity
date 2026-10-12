@@ -10,7 +10,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
 // The dead row of S1's table (CONTRACT v5 S5; plan C5a3): a bringUp whose
@@ -116,7 +115,7 @@ func recycleStep(v txView, peek deadPeek, peekErr error) txStep {
 	if screen, ok := deadScreen(v, peek.content); ok {
 		if parkedTerminal(v.Row) && screen.patch["sleep_reason"] == string(session.SleepReasonProviderTerminalError) {
 			if strings.TrimSpace(v.Row.WakeRequest) == string(session.WakeCauseExplicit) {
-				return txStep{Pass: k} // an operator's wake: the screen it was parked on is recycled
+				return txStep{Pass: k} // a wake request: the screen it was parked on is recycled for its one launch
 			}
 			return txStep{Done: true, Cause: causeDead} // already parked
 		}
@@ -124,6 +123,9 @@ func recycleStep(v txView, peek deadPeek, peekErr error) txStep {
 	}
 	if !k.zombie || runtime.ContainsProviderRateLimitScreen(peek.content) {
 		return txStep{Pass: k} // legacy records a crash for a zombie alone, and never a rate-limit screen's
+	}
+	if v.World.Classified[v.It.Key] == deadToken(v.RT.Identity) {
+		return txStep{Pass: k} // A12 recorded this death's crash (SESS-089: once per episode)
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
 	k.crash = &events.Event{
@@ -179,7 +181,7 @@ func killDead(ctx context.Context, c txCaps, k deadKill) (deadKilled, error) {
 		if c.start.rec != nil {
 			c.start.rec.Record(*k.crash)
 		}
-		telemetry.RecordAgentCrash(context.Background(), k.crash.Subject, k.crash.Message)
+		recordAgentCrash(context.Background(), k.crash.Subject, k.crash.Message)
 	}
 	return out, err
 }
